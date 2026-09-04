@@ -171,3 +171,18 @@ class RecallTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.repo.count(), 5)
         finally:
             recollection.SEMANTIC_SCAN_MAX = original
+
+    async def test_a_fuzzy_query_still_finds_a_memory_written_seconds_ago(self):
+        # Without this she says "Noted", is asked about it in the next breath,
+        # and finds nothing — the worker has not run yet and the query carries
+        # no project or date for the cheap path to use.
+        await self._add("the deployment script needs sudo", embed=False)
+        out = await recall(self.repo, self.embedder, "deployment script")
+        self.assertTrue(out["results"], "a just-written memory was invisible")
+        self.assertEqual(out["results"][0]["body"], "the deployment script needs sudo")
+
+    async def test_ranked_results_still_come_before_unranked_ones(self):
+        await self._add("a properly embedded memory about deployment")
+        await self._add("an unembedded memory about deployment", embed=False)
+        out = await recall(self.repo, self.embedder, "deployment")
+        self.assertIn("properly embedded", out["results"][0]["body"])

@@ -30,6 +30,10 @@ from yuri.mcp import naming as mcp_naming
 from yuri.mcp.jsonrpc import McpError
 from yuri.mcp.manager import CONFIRM_ARG
 from yuri.own import search as own_search
+from yuri.services import recollection
+from yuri.domain.event import EventType, YuriEvent
+from yuri.domain.ids import utcnow
+from yuri.domain.memory import InvalidMemory, Memory
 from yuri.domain.mission import InvalidTransition
 from yuri.services.missions import MISSION_LIST_MAX, TITLE_SPEECH_MAX, clip_speech
 
@@ -458,14 +462,60 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "type": "function",
         "name": "remember",
         "category": "herself",
-        "description": "Store a durable fact in Yuri's memory (~/Yuri/memory). Use it when the user states a preference, corrects you, or says 'remember this'. Pass project to file it under that project's notes instead of the user's. One sentence; add project when it is about a specific project. Do not ask permission to remember ordinary preferences — do it and say so briefly (\"Noted.\").",
+        "tier": "safe",
+        "description": (
+            "Keep something in your memory. One sentence, in their terms. Use it when "
+            "the user states a preference, "
+            "corrects you, or says 'remember this'. Do not ask permission to remember an "
+            "ordinary preference — do it and say so briefly (\"Noted.\").\n"
+            "Pass kind: 'preference' for how they want you to BEHAVE (these are always in "
+            "your prompt, so a rule belongs here, not in a fact), or 'fact' for something "
+            "about them or their world. Pass project for something true of one project "
+            "only.\n"
+            "If this REPLACES something you already remember, pass replaces with a few "
+            "words from the old memory — the tool tells you which one it retired, and you "
+            "should say so (\"replaced the old one about language\"), because that is how "
+            "the user catches it picking the wrong one. If the phrase is ambiguous the tool "
+            "lists what matched: read those back and ask which.\n"
+            "Pass inferred: true when this is YOUR conclusion rather than something they "
+            "said. Say it as a guess when you mention it. Never write \"I think\" into the "
+            "fact itself — the tool records that separately."),
         "parameters": {
             "type": "object",
             "properties": {
-                "fact": {"type": "string", "description": "One sentence, in the user's terms."},
-                "project": {"type": "string", "description": "Optional project folder name the fact is about."},
+                "fact": {"type": "string", "description": "One sentence, in the user's own terms."},
+                "kind": {"type": "string", "description": "'preference' for how you should behave, or 'fact' (the default) for something about them."},
+                "project": {"type": "string", "description": "Optional project folder name, when the memory is only true of that project."},
+                "replaces": {"type": "string", "description": "A few words from the memory this supersedes. Omit unless it really replaces one."},
+                "inferred": {"type": "boolean", "description": "True when you concluded this rather than being told it."},
             },
             "required": ["fact"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "recall",
+        "category": "herself",
+        "tier": "safe",
+        "description": (
+            "Search your own memory for something not already in front of you. Your prompt "
+            "carries what matters most; this is for everything else — what happened on an "
+            "earlier day, notes about a project, something you noticed weeks ago.\n"
+            "Use the smallest question that works: pass project or since when you know "
+            "them, because that answers instantly, while a broad question takes a moment. "
+            "Do NOT call this every turn — if the answer is already in what you remember, "
+            "just say it.\n"
+            "Results are things that were SAID, each with who said it and when. Read them "
+            "back that way, and if the tool says it could not search by meaning, say the "
+            "right one may not be there."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What you are trying to find, in plain words."},
+                "project": {"type": "string", "description": "Optional: only memories about this project folder."},
+                "since": {"type": "string", "description": "Optional date, YYYY-MM-DD — only memories from then on."},
+            },
+            "required": ["query"],
         },
     },
     {
@@ -914,6 +964,84 @@ def _running_mission_for(goal: str):
     return None
 
 
+def _remember(args: dict[str, Any]) -> dict[str, Any]:
+    """Write one memory. Returns at sqlite speed (spec §7.2).
+
+    NO embedding happens here, deliberately: an inline 1.37s call would leave
+    her silent before saying "Noted." on the most common memory interaction
+    there is. The row goes in with no vector and the background worker fills
+    it in — findable immediately, semantically searchable a second later.
+
+    `replaces` is resolved by phrase and the result NAMES what it retired, so
+    a wrong resolution is audible in her next sentence rather than discovered
+    later in the panel.
+    """
+    c = container()
+    fact = " ".join(str(args.get("fact") or "").split())
+    if not fact:
+        raise ValueError("what should I remember? Ask them to say it again, then call this.")
+
+    slug = None
+    project = (args.get("project") or "").strip()
+    if project:
+        # resolve_or_create raises ValueError (sandbox) — a soft error naming
+        # the roots, which the model reads back.
+        slug = c.projects.resolve_or_create(project).slug
+
+    kind = (args.get("kind") or "").strip().lower()
+    if slug:
+        # A project memory is a project memory whatever she called it: the
+        # core tier selects these by slug, and `preference` under a slug would
+        # never be selected at all.
+        kind = "project"
+    elif kind not in ("preference", "fact"):
+        kind = "fact"
+    source = "inferred" if args.get("inferred") else "stated"
+
+    mem = c.memories
+    # The dedup no-op (spec §5.4): remembering the same sentence twice is one
+    # memory, and saying so beats a silent duplicate she will later read twice.
+    existing = mem.duplicate_of(fact)
+    if existing is not None:
+        return {"remembered": False, "body": existing.body, "kind": existing.kind,
+                "replaced": None,
+                "message": "I already had that, word for word — nothing to add."}
+
+    replaced = None
+    phrase = (args.get("replaces") or "").strip()
+    if phrase:
+        # Raises ValueError on ambiguity, listing what matched — a soft error
+        # the model reads back so the user picks.
+        replaced = mem.resolve_replaces(phrase)
+
+    try:
+        m = Memory(body=fact, kind=kind, subject=slug or "user",
+                   source=source, origin="voice")
+    except InvalidMemory as exc:
+        raise ValueError(str(exc)) from exc
+    mem.add(m)
+
+    if replaced is not None:
+        mem.supersede(replaced, m)
+
+    c.bus.publish(YuriEvent.make(EventType.MEMORY_REMEMBERED, payload={
+        "fact": m.body, "kind": m.kind, "source": m.source,
+        "project": slug, "replaced": replaced.body if replaced else None}))
+    c.journal.append(f"remembered{' for ' + slug if slug else ''}: {m.body}")
+
+    if replaced is not None:
+        return {"remembered": True, "body": m.body, "kind": m.kind,
+                "replaced": replaced.body,
+                "message": (f'Noted, and that replaces "{replaced.body}". Tell them which '
+                            "one you retired — if it is the wrong one, they need to hear it "
+                            "now.")}
+    where = f" under {slug}" if slug else ""
+    guess = " I've marked it as my own guess rather than something they said." if \
+        source == "inferred" else ""
+    return {"remembered": True, "body": m.body, "kind": m.kind, "replaced": None,
+            "message": f"Noted{where}.{guess}"}
+
+
 async def _start_mission(args: dict[str, Any]) -> dict[str, Any]:
     """Plan first, run only on the second call (spec §14.1).
 
@@ -1192,18 +1320,17 @@ async def _dispatch(name: str, args: dict[str, Any]) -> dict[str, Any]:
         return {"muted": True, "message": "Microphone muted. The user can unmute with the on-screen button."}
 
     if name == "remember":
+        return _remember(args)
+
+    if name == "recall":
         c = container()
         slug = None
         project = (args.get("project") or "").strip()
         if project:
             slug = c.projects.resolve_or_create(project).slug     # ValueError → soft error
-        path = c.memory.remember(args.get("fact", ""), project_slug=slug)
-        from yuri.domain.event import EventType, YuriEvent
-        c.bus.publish(YuriEvent.make(EventType.MEMORY_REMEMBERED, payload={"fact": args.get("fact", ""),
-                                                                            "project": slug}))
-        c.journal.append(f"remembered{' for ' + slug if slug else ''}: {args.get('fact', '')}")
-        return {"ok": True, "path": path,
-                "message": "Remembered." if not slug else f"Noted under {slug}."}
+        return await c.memories.recall(
+            str(args.get("query") or ""), subject=slug,
+            since=(args.get("since") or "").strip() or None)
 
     if name == "set_narration":
         from yuri.app import set_narration_mode

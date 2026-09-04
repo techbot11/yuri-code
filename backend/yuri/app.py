@@ -38,6 +38,7 @@ from yuri.mcp.manager import McpManager
 from yuri.services.embed_worker import EmbedWorker
 from yuri.services.embedding import GeminiEmbedder
 from yuri.services.legacy_memory import import_legacy
+from yuri.services.recollection import Recollection
 from yuri.narration.policy import MODES, Mode, normalize_mode
 from yuri.narration.service import NarrationService
 from yuri.providers.base import AgentProvider
@@ -91,6 +92,9 @@ class Container:
     # worker exists so `remember` never blocks on a 1.37s network call.
     embedder: GeminiEmbedder
     embed_worker: EmbedWorker
+    # Memory as a service: tools.py and the API go through this, never into
+    # the store, which an architectural test enforces.
+    memories: Recollection
     # Configured MCP servers and the tools they currently provide. Built here
     # but CONNECTED in startup(), because connecting is async and best-effort:
     # a server that will not start must not stop the backend.
@@ -212,7 +216,8 @@ def build_container(home: Home, registry: AgentRegistry, *, bridge: Bridge | Non
         raise
     c = Container(home, store, bus, registry, router, journal, memory, narration, projects, approvals, missions,
                  sessions, roster, workflow, dispatcher, embedder,
-                 EmbedWorker(store, embedder), McpManager(home.path))
+                 EmbedWorker(store, embedder), Recollection(store, embedder),
+                 McpManager(home.path))
     set_container(c)
     return c
 

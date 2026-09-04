@@ -18,6 +18,7 @@ store; `core_block` is the one impure entry point.
 """
 from __future__ import annotations
 
+from yuri.domain.ids import utcnow
 from yuri.domain.memory import Memory
 from yuri.services._util import STOPWORDS
 from yuri.services.embedding import EmbeddingUnavailable, cosine
@@ -319,9 +320,109 @@ async def recall(repo, embedder, query: str, subject: str | None = None,
             continue
     scored.sort(key=lambda pair: pair[0], reverse=True)
     rows = [m for _, m in scored]
+
+    # Rows the worker has not reached yet are matched on words and appended
+    # AFTER the ranked ones. Without this a memory written seconds ago is
+    # invisible to a fuzzy question — she says "Noted", is asked about it, and
+    # finds nothing. The cheap path covers it only when the question carries a
+    # project or a date, which a plain question does not. Found by a test that
+    # remembered something and immediately recalled it.
+    embedded = {m.id for m in candidates}
+    words = _keywords(query)
+    if words:
+        fresh = [m for m in repo.needing_embedding(limit=RECALL_MAX * 4)
+                 if m.id not in embedded and words & _keywords(m.body)]
+        fresh.sort(key=lambda m: (len(words & _keywords(m.body)), m.created_at), reverse=True)
+        rows = rows + fresh
     # Asked for at most N and got exactly N: there may be more behind it, and
     # saying so is the difference between "these are the closest" and "these
     # are the closest of everything".
     hit_the_cap = len(candidates) >= SEMANTIC_SCAN_MAX
     return _answer(rows, len(rows), SEMANTIC, degraded=False,
                    capped=SEMANTIC_SCAN_MAX if hit_the_cap else 0)
+
+
+# --- the service ------------------------------------------------------------
+
+
+class Recollection:
+    """Memory as a service, so nothing above it reaches into the store.
+
+    `tools.py` is forbidden from touching `.store.` by an architectural test
+    (test_mission_tools), and rightly: the shaping rules — what the core tier
+    selects, how a recall result is attributed, what supersedes what — belong
+    in one place rather than being re-derived by each caller.
+
+    The pure functions above stay module-level so they can be tested without a
+    store; this class is the seam everything else uses.
+    """
+
+    def __init__(self, store, embedder=None):
+        self.repo = store.memories
+        self.embedder = embedder
+
+    # --- reading ----------------------------------------------------------
+
+    def current(self, kinds: list[str] | None = None, subjects: list[str] | None = None,
+                limit: int = 400) -> list[Memory]:
+        return self.repo.current(kinds=kinds, subjects=subjects, limit=limit)
+
+    def get(self, id: str) -> Memory:
+        m = self.repo.get(id)
+        if m is None:
+            raise KeyError(f"no memory {id!r}")
+        return m
+
+    def history(self, id: str) -> list[Memory]:
+        """What this memory replaced. Superseded rows are kept, not deleted —
+        "you used to want X" is occasionally the answer."""
+        return self.repo.superseded_of(id)
+
+    def core_block(self, project_slugs: list[str]) -> str:
+        return core_block(self.repo, project_slugs)
+
+    def budget_report(self, project_slugs: list[str]) -> dict:
+        """Which memories are NOT reaching her, for the panel (spec §6).
+
+        This is the "nothing is dropped silently" rule made visible: today's
+        truncation becomes something the user can see and fix by pinning.
+        """
+        rows = self.repo.current(limit=400)
+        chosen, omitted = select_core(rows, project_slugs)
+        block = render_core(chosen, omitted)
+        ids = {m.id for m in chosen}
+        return {"used": len(block), "budget": CORE_BUDGET_CHARS,
+                "in_prompt": sorted(ids), "omitted": omitted,
+                "total": self.repo.count()}
+
+    async def recall(self, query: str, subject: str | None = None,
+                     since: str | None = None) -> dict:
+        return await recall(self.repo, self.embedder, query, subject=subject, since=since)
+
+    # --- writing ----------------------------------------------------------
+
+    def duplicate_of(self, body: str) -> Memory | None:
+        return self.repo.by_body(body)
+
+    def add(self, m: Memory) -> Memory:
+        """Insert with NO embedding (spec §7.2) — the worker fills it in."""
+        self.repo.insert(m)
+        return m
+
+    def resolve_replaces(self, phrase: str) -> Memory:
+        return resolve_replaces(phrase, self.repo.current(limit=400))
+
+    def supersede(self, victim: Memory, by: Memory) -> None:
+        victim.superseded_by = by.id
+        victim.updated_at = utcnow()
+        self.repo.update(victim)
+
+    def edit(self, m: Memory) -> Memory:
+        m.updated_at = utcnow()
+        self.repo.update(m)
+        return m
+
+    def delete(self, id: str) -> None:
+        """A hard delete, and the ONLY one. No voice tool reaches this: losing
+        a memory on a mishearing is not recoverable."""
+        self.repo.delete(id)
