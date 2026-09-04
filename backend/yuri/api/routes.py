@@ -27,7 +27,7 @@ from yuri.domain.workflow import InvalidWorkflowTransition
 from yuri.mcp import config as mcp_config
 from yuri.mcp.manager import FAILED_VERDICT, probe
 from yuri.services.missions import MissionInUse
-from yuri.services.roster import NoSpecialist, SpecialistInUse
+from yuri.services.roster import DuplicateSpecialist, NoSpecialist, SpecialistInUse
 from yuri.narration.policy import MODES
 from .schemas import (AssignBody, McpEnabled, McpServerBody, NarrationUpdate,
                       ProjectCreate, SpecialistBody, WorkflowBody)
@@ -243,6 +243,10 @@ def build_router(require_auth: Callable) -> APIRouter:
         try:
             return container().roster.create(
                 **{k: v for k, v in body.model_dump().items() if v is not None}).to_dict()
+        except DuplicateSpecialist as exc:
+            # A conflict, not a malformed request: the name or its short form
+            # is taken, and the message names the holder.
+            raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -263,7 +267,20 @@ def build_router(require_auth: Callable) -> APIRouter:
                 specialist_id, **body.model_dump(exclude_unset=True)).to_dict()
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
-        except SpecialistInUse as exc:
+        except (SpecialistInUse, DuplicateSpecialist) as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @r.post("/specialists/{specialist_id}/reset")
+    async def reset_specialist(specialist_id: str):
+        """Put a built-in specialist back to what it shipped with, including
+        un-retiring it. The row is kept: its id is on every task it ever ran."""
+        try:
+            return container().roster.reset(specialist_id).to_dict()
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except (SpecialistInUse, DuplicateSpecialist) as exc:
             raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
@@ -271,7 +288,10 @@ def build_router(require_auth: Callable) -> APIRouter:
     @r.delete("/specialists/{specialist_id}")
     async def archive_specialist(specialist_id: str):
         """Archives; never deletes. A specialist's id is on every task it ever
-        ran, so removing the row would orphan the history."""
+        ran, so removing the row would orphan the history.
+
+        A built-in can be retired too (the user asked for it) — POST
+        …/reset brings it back. Still 409 while a live task holds it."""
         try:
             container().roster.archive(specialist_id)
         except KeyError as exc:

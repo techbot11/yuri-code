@@ -26,7 +26,14 @@ from yuri.api.routes import build_router  # noqa: E402
 from yuri.providers.fake import FakeAgentProvider  # noqa: E402
 
 
-class Phase7Api(unittest.TestCase):
+class _Harness(unittest.TestCase):
+    """Setup only — no tests of its own.
+
+    A class carrying both the harness and tests makes every subclass re-run
+    all of them. That has now happened three times in this codebase, so the
+    split is structural rather than remembered.
+    """
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = os.path.join(self.tmp.name, "proj")
@@ -58,6 +65,18 @@ class Phase7Api(unittest.TestCase):
 
     # --- the roster ---------------------------------------------------------
 
+    def _workflow(self, **body):
+        body.setdefault("template", "bug-fix")
+        r = self.client.post(f"/yuri/missions/{self.mission.id}/workflow", json=body)
+        self.assertEqual(r.status_code, 201, r.text)
+        return r.json()["workflow"]
+
+    def _tasks(self, w):
+        return self.client.get(f"/yuri/missions/{self.mission.id}/workflow").json()["tasks"]
+
+
+
+class Phase7Api(_Harness):
     def test_the_seeded_roster_is_listed(self):
         r = self.client.get("/yuri/specialists")
         self.assertEqual(r.status_code, 200)
@@ -107,11 +126,15 @@ class Phase7Api(unittest.TestCase):
         self.assertEqual(r.status_code, 409, r.text)
         self.assertIn("live task", r.json()["detail"])
 
-    def test_a_builtin_specialist_cannot_be_archived(self):
+    def test_a_builtin_specialist_can_be_retired_and_brought_back(self):
+        # Was "cannot be archived". Changed on the user's request; the way
+        # back is POST …/reset, which un-retires it with its original prompt.
         builtin = next(s for s in self.client.get("/yuri/specialists").json()["specialists"]
                        if s["builtin"])
-        r = self.client.delete(f"/yuri/specialists/{builtin['id']}")
-        self.assertEqual(r.status_code, 409)
+        self.assertEqual(self.client.delete(f"/yuri/specialists/{builtin['id']}").status_code, 200)
+        r = self.client.post(f"/yuri/specialists/{builtin['id']}/reset")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertFalse(r.json()["archived"])
 
     # --- roles and templates ------------------------------------------------
 
@@ -133,15 +156,6 @@ class Phase7Api(unittest.TestCase):
         self.assertTrue(any(t["depends_on"] for t in bugfix["tasks"]))
 
     # --- workflows ----------------------------------------------------------
-
-    def _workflow(self, **body):
-        body.setdefault("template", "bug-fix")
-        r = self.client.post(f"/yuri/missions/{self.mission.id}/workflow", json=body)
-        self.assertEqual(r.status_code, 201, r.text)
-        return r.json()["workflow"]
-
-    def _tasks(self, w):
-        return self.client.get(f"/yuri/missions/{self.mission.id}/workflow").json()["tasks"]
 
     def test_a_mission_with_no_workflow_answers_200_with_null(self):
         # Not a 404: "no workflow yet" is a normal answer the timeline renders
@@ -296,3 +310,79 @@ class Phase7Api(unittest.TestCase):
 
     def test_artifacts_for_an_unknown_mission_is_a_404(self):
         self.assertEqual(self.client.get("/yuri/missions/nope/artifacts").status_code, 404)
+
+
+class EditingBuiltinsTests(_Harness):
+    """The user asked to edit, retire and reset built-in agents."""
+
+    def _builtin(self):
+        return next(s for s in self.client.get("/yuri/specialists").json()["specialists"]
+                    if s["slug"] == "reviewer")
+
+    def test_a_builtin_can_be_edited_through_the_api(self):
+        b = self._builtin()
+        r = self.client.put(f"/yuri/specialists/{b['id']}",
+                            json={"system_prompt": "Be extremely strict."})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["system_prompt"], "Be extremely strict.")
+        self.assertTrue(r.json()["builtin"])
+
+    def test_a_builtin_can_be_renamed_without_breaking_the_next_start(self):
+        b = self._builtin()
+        self.client.put(f"/yuri/specialists/{b['id']}", json={"name": "Strict Reviewer"})
+        # seed() runs at every container build; it must find the renamed one
+        # by slug rather than inserting a twin.
+        self.assertEqual(self.c.roster.seed(), 0)
+        names = [s["name"] for s in self.client.get("/yuri/specialists").json()["specialists"]]
+        self.assertIn("Strict Reviewer", names)
+        self.assertNotIn("Reviewer", names)
+
+    def test_a_builtin_can_be_retired(self):
+        b = self._builtin()
+        r = self.client.delete(f"/yuri/specialists/{b['id']}")
+        self.assertEqual(r.status_code, 200, r.text)
+        slugs = [s["slug"] for s in self.client.get("/yuri/specialists").json()["specialists"]]
+        self.assertNotIn("reviewer", slugs)
+
+    def test_reset_brings_a_retired_builtin_back_with_its_original_prompt(self):
+        b = self._builtin()
+        original = b["system_prompt"]
+        self.client.put(f"/yuri/specialists/{b['id']}", json={"system_prompt": "ruined"})
+        self.client.delete(f"/yuri/specialists/{b['id']}")
+        r = self.client.post(f"/yuri/specialists/{b['id']}/reset")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["system_prompt"], original)
+        self.assertFalse(r.json()["archived"])
+
+    def test_reset_keeps_the_same_id(self):
+        b = self._builtin()
+        r = self.client.post(f"/yuri/specialists/{b['id']}/reset")
+        self.assertEqual(r.json()["id"], b["id"])
+
+    def test_reset_on_a_specialist_the_user_made_is_a_400(self):
+        sid = self.client.post("/yuri/specialists", json={
+            "name": "Mine", "role": "reviewer", "provider_id": "fake"}).json()["id"]
+        r = self.client.post(f"/yuri/specialists/{sid}/reset")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("not built in", r.json()["detail"])
+
+    def test_reset_on_an_unknown_specialist_is_a_404(self):
+        self.assertEqual(self.client.post("/yuri/specialists/nope/reset").status_code, 404)
+
+    def test_retiring_a_builtin_a_live_task_holds_is_still_a_409(self):
+        # Editing and retiring became allowed; the live-work refusal did not.
+        b = self._builtin()
+        w = self._workflow()
+        task = next(t for t in self._tasks(w) if t["role"] == "reviewer")
+        asyncio.run(self.c.workflow.assign(task["id"], b["id"], by="test"))
+        r = self.client.delete(f"/yuri/specialists/{b['id']}")
+        self.assertEqual(r.status_code, 409, r.text)
+
+    def test_a_name_that_would_share_a_short_name_is_a_409_not_a_500(self):
+        # create() raised a raw sqlite3.IntegrityError on the slug before this.
+        b = self._builtin()
+        self.client.put(f"/yuri/specialists/{b['id']}", json={"name": "Strict Reviewer"})
+        r = self.client.post("/yuri/specialists", json={
+            "name": "Reviewer", "role": "reviewer", "provider_id": "fake"})
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertIn("Strict Reviewer", r.json()["detail"])

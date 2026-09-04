@@ -7,8 +7,9 @@
 // still `specialists` — /yuri/agents was already the provider list.
 import { ROLE_BLURB, specialistActions, type Role, type Specialist } from "@/lib/roster";
 
-export function SpecialistCard({ s, busy, onEdit, onArchive }: {
-  s: Specialist; busy: boolean; onEdit: () => void; onArchive: () => void;
+export function SpecialistCard({ s, busy, onEdit, onArchive, onReset }: {
+  s: Specialist; busy: boolean;
+  onEdit: () => void; onArchive: () => void; onReset: () => void;
 }) {
   const actions = specialistActions(s);
   const caps = s.capabilities || [];
@@ -50,19 +51,23 @@ export function SpecialistCard({ s, busy, onEdit, onArchive }: {
         </details>
       )}
 
-      {/* Absent, not disabled: a builtin's persona is not the user's to
-          rewrite and archiving one answers 409, so the controls are simply
-          not there (docs/yuri/design/GUIDE.md §6). */}
-      {(actions.edit || actions.archive) && (
-        <div className="sp-actions">
-          {actions.edit && (
-            <button className="txtoggle" disabled={busy} onClick={onEdit}>Edit</button>
-          )}
-          {actions.archive && (
-            <button className="txtoggle" disabled={busy} onClick={onArchive}>Retire</button>
-          )}
-        </div>
-      )}
+      {/* Absent, not disabled (docs/yuri/design/GUIDE.md §6). A builtin can
+          now be edited and retired like any other; what it offers INSTEAD is
+          Reset, which is the way back from a broken prompt or a retirement.
+          A specialist the user made has no default, so it shows no Reset. */}
+      <div className="sp-actions">
+        {actions.edit && (
+          <button className="txtoggle" disabled={busy} onClick={onEdit}>Edit</button>
+        )}
+        {actions.archive && (
+          <button className="txtoggle" disabled={busy} onClick={onArchive}>Retire</button>
+        )}
+        {actions.reset && (
+          <button className="txtoggle" disabled={busy} onClick={onReset}>
+            {s.archived ? "Bring back" : "Reset to default"}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
