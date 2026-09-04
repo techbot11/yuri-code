@@ -28,6 +28,8 @@ from yuri.mcp import config as mcp_config
 from yuri.mcp.manager import FAILED_VERDICT, probe
 from yuri.services.missions import MissionInUse
 from yuri.services.roster import DuplicateSpecialist, NoSpecialist, SpecialistInUse
+from yuri.workflows.loader import (MAX_TASKS_PER_WORKFLOW, VERIFY_NAMES,
+                                   TemplateError)
 from yuri.narration.policy import MODES
 from .schemas import (AssignBody, McpEnabled, McpServerBody, NarrationUpdate,
                       ProjectCreate, SpecialistBody, WorkflowBody)
@@ -319,13 +321,69 @@ def build_router(require_auth: Callable) -> APIRouter:
 
     @r.get("/templates")
     async def list_templates():
+        """Every plan shape, with enough detail to EDIT it.
+
+        `instruction` and `requires` are included where the Phase 7 version
+        omitted them: a template editor that cannot see the instruction is an
+        editor that silently drops it on save.
+        """
+        c = container()
+        custom = c.templates.custom_names()
+        builtin = c.templates.builtin_names()
         return {"templates": [
             {"name": t.name, "description": t.description,
+             "custom": t.name in custom,
+             # Whether there is a default to go back to, which is what decides
+             # if the panel offers Reset at all.
+             "has_default": t.name in builtin,
+             "verify_names": sorted(VERIFY_NAMES),
+             "max_tasks": MAX_TASKS_PER_WORKFLOW,
              "tasks": [{"id": task.id, "title": task.title, "role": task.role,
+                        "instruction": task.instruction,
                         "depends_on": list(task.depends_on), "read_only": task.read_only,
+                        "requires": list(task.requires), "kind": task.kind,
                         "verification": list(task.verification)}
                        for task in t.tasks]}
-            for t in sorted(container().workflow.templates.values(), key=lambda t: t.name)]}
+            for t in sorted(c.workflow.templates.values(), key=lambda t: t.name)]}
+
+    def _reload_templates():
+        """Push the merged set onto the engine, so a save is in effect for the
+        NEXT mission rather than after a restart.
+
+        Assigned explicitly rather than hidden in the store: the engine holds
+        its templates as plain state, and one visible line beats a callback
+        nobody can find. Same shape as `workflow.dispatch = dispatcher.dispatch`.
+        """
+        c = container()
+        c.workflow.templates = c.templates.all()
+        return c.workflow.templates
+
+    @r.put("/templates/{name}")
+    async def save_template(name: str, body: dict):
+        """Create or replace a plan shape. Validated by the SAME check the
+        loader runs at startup, so a template that saves is one that will
+        still load."""
+        c = container()
+        try:
+            c.templates.save(name, body)
+        except TemplateError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        merged = _reload_templates()
+        t = merged[name]
+        return {"name": t.name, "description": t.description, "custom": True,
+                "tasks": len(t.tasks)}
+
+    @r.delete("/templates/{name}")
+    async def reset_template(name: str):
+        """Delete the user's version. A name that is also built in comes back
+        as the default; one that was only ever the user's is gone."""
+        c = container()
+        try:
+            out = c.templates.remove(name)
+        except TemplateError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        _reload_templates()
+        return out
 
     # --- workflows ----------------------------------------------------------
     @r.get("/missions/{mission_id}/workflow")

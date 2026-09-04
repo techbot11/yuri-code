@@ -39,6 +39,7 @@ from yuri.services.embed_worker import EmbedWorker
 from yuri.services.embedding import GeminiEmbedder
 from yuri.services.legacy_memory import import_legacy
 from yuri.services.recollection import Recollection
+from yuri.services.templates import TemplateStore
 from yuri.narration.policy import MODES, Mode, normalize_mode
 from yuri.narration.service import NarrationService
 from yuri.providers.base import AgentProvider
@@ -95,6 +96,9 @@ class Container:
     # Memory as a service: tools.py and the API go through this, never into
     # the store, which an architectural test enforces.
     memories: Recollection
+    # The user's own plan shapes, overlaid on the built-in ones. The only
+    # writer of ~/Yuri/templates; the git-tracked defaults are never touched.
+    templates: TemplateStore
     # Configured MCP servers and the tools they currently provide. Built here
     # but CONNECTED in startup(), because connecting is async and best-effort:
     # a server that will not start must not stop the backend.
@@ -177,7 +181,11 @@ def build_container(home: Home, registry: AgentRegistry, *, bridge: Bridge | Non
         missions.stop_sessions = sessions.stop_many
         missions.interrupt_sessions = sessions.interrupt_many
         roster = RosterService(store, bus, registry)
-        workflow = WorkflowEngine(store, bus, journal, roster, load_templates())
+        templates = TemplateStore(home.templates_dir)
+        # The user's overrides are loaded HERE, not just the built-ins, so an
+        # edited plan is in effect from the first mission after a restart.
+        workflow = WorkflowEngine(store, bus, journal, roster,
+                                  load_templates(user_dir=home.templates_dir))
         dispatcher = WorkflowDispatcher(store, bus, sessions, workflow)
         # The same injection as stop_sessions above, and for the same reason:
         # the engine cannot import SessionService (which holds the store the
@@ -217,7 +225,7 @@ def build_container(home: Home, registry: AgentRegistry, *, bridge: Bridge | Non
     c = Container(home, store, bus, registry, router, journal, memory, narration, projects, approvals, missions,
                  sessions, roster, workflow, dispatcher, embedder,
                  EmbedWorker(store, embedder), Recollection(store, embedder),
-                 McpManager(home.path))
+                 templates, McpManager(home.path))
     set_container(c)
     return c
 

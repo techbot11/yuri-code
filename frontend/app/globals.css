@@ -4291,3 +4291,93 @@ a.miss-row {
 .wf-step.tk-failed,
 .wf-step.tk-blocked { border-left-color: var(--danger); }
 .wf-step.tk-cancelled { border-left-color: var(--dim); }
+
+/* --- plan shapes (workflow templates), in the Missions panel -------------- */
+.tpl {
+   margin-top: 26px;
+   padding-top: 22px;
+   border-top: 1px solid var(--line);
+   min-width: 0;
+}
+
+/* The heading is the disclosure control, so there is one thing to click
+   rather than a heading beside a chevron that does the same job. */
+.tpl-toggle {
+   font: inherit;
+   color: inherit;
+   letter-spacing: inherit;
+   text-transform: inherit;
+   background: none;
+   border: 0;
+   padding: 0;
+   cursor: pointer;
+}
+
+.tpl-toggle:hover {
+   color: var(--ink);
+}
+
+.tpl-list {
+   display: flex;
+   flex-direction: column;
+   gap: 12px;
+   min-width: 0;
+}
+
+.tpl-row {
+   border: 1px solid var(--line2);
+   border-radius: 14px;
+   padding: 13px 15px;
+   min-width: 0;
+}
+
+.tpl-head {
+   display: flex;
+   align-items: center;
+   gap: 9px;
+   flex-wrap: wrap;
+   min-width: 0;
+}
+
+.tpl-name {
+   font-family: var(--mono);
+   font-size: 13px;
+   color: var(--ink);
+}
+
+.tpl-meta {
+   margin-left: auto;
+   font-size: 11px;
+   color: var(--dim);
+}
+
+.tpl-desc {
+   font-size: 13px;
+   color: var(--mut);
+   margin: 7px 0 0;
+   max-width: 62ch;
+}
+
+/* Monospace and scrollable in its own box: it is JSON, and the panel must not
+   scroll sideways (GUIDE §2). */
+.tpl-editor {
+   font-family: var(--mono);
+   font-size: 12px;
+   line-height: 1.55;
+   color: var(--ink);
+   background: var(--panel);
+   border: 1px solid var(--line);
+   border-radius: 10px;
+   padding: 10px 12px;
+   margin-top: 10px;
+   width: 100%;
+   resize: vertical;
+   overflow: auto;
+   white-space: pre;
+   tab-size: 2;
+}
+
+.tpl-editor:focus {
+   outline: none;
+   border-color: var(--acc);
+}

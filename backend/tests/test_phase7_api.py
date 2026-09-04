@@ -386,3 +386,94 @@ class EditingBuiltinsTests(_Harness):
             "name": "Reviewer", "role": "reviewer", "provider_id": "fake"})
         self.assertEqual(r.status_code, 409, r.text)
         self.assertIn("Strict Reviewer", r.json()["detail"])
+
+
+class EditingTemplatesTests(_Harness):
+    """The user asked to update workflow templates too."""
+
+    def _get(self, name: str) -> dict:
+        body = self.client.get("/yuri/templates").json()["templates"]
+        return next(t for t in body if t["name"] == name)
+
+    GOOD = {"description": "Look, then do.",
+            "tasks": [{"id": "look", "role": "researcher", "title": "Look into it",
+                       "instruction": "Find out about {goal}.", "read_only": True},
+                      {"id": "do", "role": "developer", "title": "Do it",
+                       "instruction": "Fix {goal}.", "depends_on": ["look"]}]}
+
+    def test_the_listing_carries_what_an_editor_needs(self):
+        # The Phase 7 version omitted `instruction`, so an editor built on it
+        # would silently drop it on save.
+        t = self._get("bug-fix")
+        self.assertFalse(t["custom"])
+        self.assertTrue(t["has_default"])
+        self.assertTrue(all(task["instruction"] for task in t["tasks"]))
+        self.assertIn("tests_pass", t["verify_names"])
+        self.assertEqual(t["max_tasks"], 40)
+
+    def test_a_template_can_be_replaced_and_takes_effect_immediately(self):
+        r = self.client.put("/yuri/templates/bug-fix", json=self.GOOD)
+        self.assertEqual(r.status_code, 200, r.text)
+        # In effect for the NEXT mission, with no restart: the engine's own
+        # dict is what a workflow is built from.
+        self.assertEqual(len(self.c.workflow.templates["bug-fix"].tasks), 2)
+        self.assertTrue(self._get("bug-fix")["custom"])
+
+    def test_a_replaced_template_actually_builds_that_graph(self):
+        self.client.put("/yuri/templates/bug-fix", json=self.GOOD)
+        r = self.client.post(f"/yuri/missions/{self.mission.id}/workflow",
+                             json={"template": "bug-fix"})
+        self.assertEqual(r.status_code, 201, r.text)
+        titles = [t["title"] for t in r.json()["tasks"]]
+        self.assertEqual(sorted(titles), ["Do it", "Look into it"])
+
+    def test_a_new_template_can_be_added(self):
+        self.client.put("/yuri/templates/my-plan", json=self.GOOD)
+        names = [t["name"] for t in self.client.get("/yuri/templates").json()["templates"]]
+        self.assertIn("my-plan", names)
+        self.assertFalse(self._get("my-plan")["has_default"])
+
+    def test_a_cycle_is_a_400_that_names_the_members(self):
+        bad = {"tasks": [
+            {"id": "a", "role": "developer", "title": "A", "instruction": "x",
+             "depends_on": ["b"]},
+            {"id": "b", "role": "developer", "title": "B", "instruction": "y",
+             "depends_on": ["a"]}]}
+        r = self.client.put("/yuri/templates/cyclic", json=bad)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("a", r.json()["detail"])
+        self.assertIn("b", r.json()["detail"])
+
+    def test_an_unknown_role_is_a_400_not_a_500(self):
+        r = self.client.put("/yuri/templates/bad", json={
+            "tasks": [{"id": "a", "role": "wizard", "title": "A", "instruction": "x"}]})
+        self.assertEqual(r.status_code, 400)
+
+    def test_a_name_that_would_escape_the_directory_is_a_400(self):
+        r = self.client.put("/yuri/templates/..%2Fevil", json=self.GOOD)
+        self.assertIn(r.status_code, (400, 404))
+
+    def test_reset_brings_the_builtin_back_immediately(self):
+        self.client.put("/yuri/templates/bug-fix", json=self.GOOD)
+        r = self.client.delete("/yuri/templates/bug-fix")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["reverted_to_default"])
+        self.assertEqual(len(self.c.workflow.templates["bug-fix"].tasks), 4)
+        self.assertFalse(self._get("bug-fix")["custom"])
+
+    def test_deleting_a_user_only_template_removes_it_from_the_engine(self):
+        self.client.put("/yuri/templates/my-plan", json=self.GOOD)
+        self.client.delete("/yuri/templates/my-plan")
+        self.assertNotIn("my-plan", self.c.workflow.templates)
+
+    def test_deleting_something_never_customised_is_not_an_error(self):
+        r = self.client.delete("/yuri/templates/feature")
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()["removed"])
+        self.assertIn("feature", self.c.workflow.templates)
+
+    def test_a_failed_save_leaves_the_engine_alone(self):
+        before = len(self.c.workflow.templates["bug-fix"].tasks)
+        self.client.put("/yuri/templates/bug-fix", json={
+            "tasks": [{"id": "a", "role": "wizard", "title": "A", "instruction": "x"}]})
+        self.assertEqual(len(self.c.workflow.templates["bug-fix"].tasks), before)
