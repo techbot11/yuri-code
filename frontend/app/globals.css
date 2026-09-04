@@ -4381,3 +4381,82 @@ a.miss-row {
    outline: none;
    border-color: var(--acc);
 }
+
+/* --- the Memory panel ----------------------------------------------------
+   The view's job is to show which memories reach her and which do not, so the
+   state line and the left stripe both carry that — the fastest read on the
+   page is "is this one getting through". */
+.mem-view {
+   min-width: 0;
+}
+
+/* The budget report. `warn` only when something is actually being left out:
+   a permanent caution about a store that fits is noise. */
+.mem-budget {
+   font-size: 12px;
+   border: 1px solid var(--line);
+   border-radius: 10px;
+   padding: 9px 11px;
+   margin-bottom: 14px;
+   color: var(--mut);
+}
+
+.mem-budget.warn {
+   color: var(--warn);
+   border-color: var(--warn);
+}
+
+.mem-group {
+   margin-bottom: 22px;
+   min-width: 0;
+}
+
+.mem-list {
+   display: flex;
+   flex-direction: column;
+   gap: 10px;
+   min-width: 0;
+}
+
+.mem-row {
+   border: 1px solid var(--line);
+   border-left: 3px solid var(--line2);
+   border-radius: 12px;
+   padding: 11px 14px;
+   min-width: 0;
+}
+
+/* In her prompt versus not: the accent for reaching her, the quietest tone
+   for not. Deliberately NOT danger — a memory that did not fit is a budget
+   fact, not an error. */
+.mem-row.in {
+   border-left-color: var(--acc);
+}
+
+.mem-row.out {
+   border-left-color: var(--dim);
+}
+
+.mem-body {
+   font-size: 14px;
+   color: var(--ink);
+   margin: 0;
+   overflow-wrap: anywhere;
+   max-width: 70ch;
+}
+
+.mem-meta {
+   font-size: 12px;
+   color: var(--dim);
+   margin-top: 5px;
+}
+
+.mem-state {
+   font-size: 11px;
+   margin-top: 6px;
+   color: var(--dim);
+}
+
+.mem-state.in {
+   color: var(--acc);
+}
