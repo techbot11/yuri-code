@@ -35,6 +35,7 @@ from yuri.domain.ids import utcnow
 from yuri.events.bus import EventBus, bridge_to_event_log
 from yuri.home import Home, default_home
 from yuri.mcp.manager import McpManager
+from yuri.services.legacy_memory import import_legacy
 from yuri.narration.policy import MODES, Mode, normalize_mode
 from yuri.narration.service import NarrationService
 from yuri.providers.base import AgentProvider
@@ -232,6 +233,18 @@ async def startup() -> Container:
     # dispatched/completed) and those events should be persisted, not dropped
     # into a queue nobody is reading yet.
     c.dispatcher.start()
+    try:
+        # Once, ever, and the markdown files are never modified (spec §8). Not
+        # a migration: migrate() runs SQL only and has no Home. A failure here
+        # leaves the flag unset so the next start retries, and must not stop
+        # the backend — an unimported memory is a memory she does not have
+        # yet, not a broken app.
+        moved = import_legacy(c.store, c.home)
+        if moved["imported"] or moved["skipped"]:
+            log.info("memory: imported %d line(s) from %s, skipped %d",
+                     moved["imported"], c.home.memory_dir, moved["skipped"])
+    except Exception:
+        log.exception("yuri: importing the existing markdown memory failed; will retry next start")
     try:
         # Best effort, and never blocking: each server has its own bounded
         # connect timeout, and one that fails is logged and simply not
