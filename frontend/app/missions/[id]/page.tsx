@@ -1,6 +1,7 @@
 "use client";
 
-// The Mission detail view. Fetches its own steps/sessions/approvals/events
+// The Mission detail view. Fetches its own steps (the workflow's tasks —
+// see Task in lib/yuriTypes.ts)/sessions/approvals/events
 // through lib/api.ts rather than reading them off useYuri() — the provider
 // deliberately holds only global-and-continuous state (the boundary Task 3
 // drew), and this detail is per-view, fetched on demand.
@@ -10,16 +11,17 @@ import Link from "next/link";
 import { useYuri } from "@/components/VoiceProvider";
 import { ApprovalCard } from "@/components/ApprovalCard";
 import { ViewError } from "@/components/ViewError";
+import { WorkflowTimeline } from "@/components/WorkflowTimeline";
 import { MISSION_CLASS, canCancel, canPause, canResume } from "@/lib/missions";
 import { sessionLabel } from "@/lib/sessions";
 import { yget, ypost, ApiError } from "@/lib/api";
 import { fmtLogTime, fmtLogTimeTitle, clip } from "@/lib/format";
 import { isFlatObject } from "@/lib/timeline";
-import type { Approval, AgentSession, Mission, MissionStep, YuriEvent } from "@/lib/yuriTypes";
+import type { Approval, AgentSession, Mission, Task, YuriEvent } from "@/lib/yuriTypes";
 
 type MissionDetail = {
   mission: Mission;
-  steps: MissionStep[];
+  steps: Task[];
   sessions: AgentSession[];
   approvals: Approval[]; // this mission's, oldest first
   events: YuriEvent[]; // its last 50
@@ -62,11 +64,24 @@ export default function MissionDetailPage() {
   // Refresh on this mission's own events rather than a timer — the same
   // onYuriEvent subscription every other view uses (see app/page.tsx,
   // app/approvals/page.tsx). Scoped to this mission_id so another mission's
-  // status change elsewhere doesn't refetch a detail nobody is looking at.
+  // change elsewhere doesn't refetch a detail nobody is looking at.
+  //
+  // `approval.` matters as much as `mission.`: answering by voice publishes
+  // approval.resolved and nothing else, so listening only for mission.* left
+  // this page showing an answered approval as still waiting, with live
+  // Allow/Deny buttons that could then only 409. Both events carry
+  // mission_id (yuri/services/approvals.py).
+  //
+  // `task.` too, since a Phase 7 workflow moves tasks without necessarily
+  // moving the mission's own status.
   useEffect(
     () =>
       onYuriEvent((ev) => {
-        if (ev.type.startsWith("mission.") && ev.mission_id === id) void load();
+        if (ev.mission_id !== id) return;
+        if (ev.type.startsWith("mission.") || ev.type.startsWith("approval.") ||
+            ev.type.startsWith("task.")) {
+          void load();
+        }
       }),
     [onYuriEvent, load, id],
   );
@@ -173,24 +188,17 @@ export default function MissionDetailPage() {
       )}
 
       <section className="miss-section">
-        <h3 className="apr-subhead">Steps</h3>
-        {orderedSteps.length === 0 ? (
-          <div className="empty">No steps yet.</div>
-        ) : (
-          <div className="dash-list">
-            {orderedSteps.map((s) => (
-              <div className="dash-row" key={s.id}>
-                <div className="dash-row-top">
-                  <span className="dash-row-title">
-                    {s.ordinal}. {s.title}
-                  </span>
-                  <span className="dash-row-meta">{s.status}</span>
-                </div>
-                {s.agent_id && <span className="dash-row-task">{s.agent_id}</span>}
-              </div>
-            ))}
-          </div>
-        )}
+        <h3 className="apr-subhead">The plan</h3>
+        {/* Replaces the ordinal-sorted list: ordinal is AUTHORING order, and
+            what a reader needs is the order the work actually runs in, with
+            who has each step and what the checks said. WorkflowTimeline
+            fetches the workflow endpoint itself because this page's `steps`
+            carry neither the dependency map nor the verdicts.
+
+            `refreshKey` re-fetches when this page does, so a step that
+            changes while the user watches is picked up by the same event that
+            refreshes everything else. */}
+        <WorkflowTimeline missionId={id} refreshKey={orderedSteps.length + events.length} />
       </section>
 
       <section className="miss-section">

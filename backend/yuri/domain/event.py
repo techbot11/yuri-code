@@ -34,6 +34,19 @@ class EventType:
     AGENT_ERROR = "agent.error"
     PROJECT_REGISTERED = "project.registered"
     MEMORY_REMEMBERED = "memory.remembered"
+    SPECIALIST_CREATED = "specialist.created"
+    SPECIALIST_UPDATED = "specialist.updated"
+    SPECIALIST_ARCHIVED = "specialist.archived"
+    WORKFLOW_CREATED = "workflow.created"
+    WORKFLOW_COMPLETED = "workflow.completed"
+    WORKFLOW_DEADLOCKED = "workflow.deadlocked"
+    TASK_DISPATCHED = "task.dispatched"
+    TASK_COMPLETED = "task.completed"
+    TASK_FAILED = "task.failed"
+    TASK_BLOCKED = "task.blocked"
+    TASK_VERIFYING = "task.verifying"
+    VERIFICATION_FAILED = "verification.failed"
+    HANDOFF_PASSED = "handoff.passed"
 
 
 # type -> (severity, speakable)   (spec §6.1)
@@ -55,6 +68,28 @@ DEFAULTS: dict[str, tuple[str, bool]] = {
     EventType.AGENT_ERROR: ("error", True),
     EventType.PROJECT_REGISTERED: ("info", False),
     EventType.MEMORY_REMEMBERED: ("info", False),
+    EventType.SPECIALIST_CREATED: ("info", False),
+    EventType.SPECIALIST_UPDATED: ("info", False),
+    EventType.SPECIALIST_ARCHIVED: ("info", False),
+    # Phase 7's engine events. The severities are what quiet mode filters on
+    # (policy.speaks reads them), so the three that need a human — a failed
+    # task, an exhausted one, a stalled workflow — are `warning`/`error` and
+    # survive "be quiet", while the per-task texture is not.
+    EventType.WORKFLOW_CREATED: ("info", True),
+    EventType.WORKFLOW_COMPLETED: ("info", True),
+    EventType.WORKFLOW_DEADLOCKED: ("warning", True),
+    EventType.TASK_DISPATCHED: ("info", True),
+    EventType.TASK_COMPLETED: ("info", False),
+    EventType.TASK_FAILED: ("warning", True),
+    EventType.TASK_BLOCKED: ("warning", True),
+    EventType.TASK_VERIFYING: ("debug", False),
+    # `warning`, so it survives quiet mode: a task that did not verify is
+    # exactly the thing "be quiet" must not swallow — the alternative is a
+    # workflow that stops with the user never told which check said no.
+    EventType.VERIFICATION_FAILED: ("warning", True),
+    # `False`, like task.completed: it is texture in a long workflow, spoken
+    # only when the user asked for everything (stream_verbose).
+    EventType.HANDOFF_PASSED: ("info", False),
 }
 
 

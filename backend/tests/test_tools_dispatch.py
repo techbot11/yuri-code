@@ -279,3 +279,205 @@ class ToolsDispatch(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CancelMissionNeedsConfirmingTests(ToolsDispatch):
+    """Cancelling ends work and stops running agents.
+
+    The only thing standing between a misheard phrase and that happening used
+    to be a sentence in the tool's description telling the model to confirm.
+    A prompt instruction is not a guard — this is the same reasoning that kept
+    mission DELETE off the voice surface entirely.
+
+    Found in the field: a mission the user never named was cancelled `by:
+    "voice"` two seconds after an unrelated one was cancelled from the UI.
+    """
+
+    def setUp(self):
+        super().setUp()
+        tools._pending_confirm = None
+
+    def tearDown(self):
+        tools._pending_confirm = None
+        super().tearDown()
+
+    async def _mission(self, title="billing fix"):
+        # Clear the duplicate guard: it redirects a second start within
+        # START_GUARD_SECS to the first, and these tests deliberately want two
+        # distinct missions in quick succession.
+        tools._last_start = None
+        out = await tools.dispatch_tool("start_session",
+                                        {"project_path": "proj", "name": title})
+        return out["mission_id"]
+
+    async def test_the_first_call_never_cancels(self):
+        mid = await self._mission()
+        out = await tools.dispatch_tool("cancel_mission", {"mission": "billing fix"})
+        self.assertIs(out["cancelled"], False)
+        self.assertIn("confirm", out)
+        self.assertNotEqual(self.c.missions.get(mid).status, "cancelled",
+                            "one call cancelled the mission")
+
+    async def test_the_first_call_says_what_would_happen(self):
+        await self._mission()
+        out = await tools.dispatch_tool("cancel_mission", {"mission": "billing fix"})
+        self.assertIn("billing fix", out["message"])
+        self.assertIn("Nothing has been cancelled yet", out["message"])
+
+    async def test_a_second_call_with_the_token_cancels(self):
+        mid = await self._mission()
+        armed = await tools.dispatch_tool("cancel_mission", {"mission": "billing fix"})
+        out = await tools.dispatch_tool("cancel_mission",
+                                                            {"mission": "billing fix", "confirm": armed["confirm"]})
+        self.assertIs(out["cancelled"], True)
+        self.assertEqual(self.c.missions.get(mid).status, "cancelled")
+
+    async def test_an_invented_token_is_refused(self):
+        mid = await self._mission()
+        await tools.dispatch_tool("cancel_mission", {"mission": "billing fix"})
+        out = await tools.dispatch_tool("cancel_mission",
+                                                            {"mission": "billing fix", "confirm": "deadbeef"})
+        self.assertIs(out["cancelled"], False)
+        self.assertNotEqual(self.c.missions.get(mid).status, "cancelled")
+
+    async def test_a_wrong_guess_burns_the_arm(self):
+        # Single use, consumed whether or not it matched: otherwise a model
+        # could guess repeatedly against one still-valid arm.
+        mid = await self._mission()
+        armed = await tools.dispatch_tool("cancel_mission", {"mission": "billing fix"})
+        await tools.dispatch_tool("cancel_mission", {"mission": "billing fix", "confirm": "nope"})
+        out = await tools.dispatch_tool("cancel_mission",
+                                                            {"mission": "billing fix", "confirm": armed["confirm"]})
+        self.assertIs(out["cancelled"], False, "the burned token still worked")
+        self.assertNotEqual(self.c.missions.get(mid).status, "cancelled")
+
+    async def test_a_token_armed_for_one_mission_cannot_cancel_another(self):
+        # The exact shape of the reported bug: the wrong mission going down.
+        first = await self._mission("billing fix")
+        second = await self._mission("docs pass")
+        armed = await tools.dispatch_tool("cancel_mission", {"mission": "billing fix"})
+        out = await tools.dispatch_tool("cancel_mission",
+                                                            {"mission": "docs pass", "confirm": armed["confirm"]})
+        self.assertIs(out["cancelled"], False)
+        self.assertNotEqual(self.c.missions.get(second).status, "cancelled")
+        self.assertNotEqual(self.c.missions.get(first).status, "cancelled")
+
+    async def test_a_stale_arm_expires(self):
+        import tools as tools_mod
+        mid = await self._mission()
+        armed = await tools.dispatch_tool("cancel_mission", {"mission": "billing fix"})
+        tools_mod._pending_confirm["ts"] -= tools_mod.CONFIRM_SECS + 1
+        out = await tools.dispatch_tool("cancel_mission",
+                                                            {"mission": "billing fix", "confirm": armed["confirm"]})
+        self.assertIs(out["cancelled"], False)
+        self.assertNotEqual(self.c.missions.get(mid).status, "cancelled")
+
+    async def test_pause_and_resume_are_untouched_and_still_single_call(self):
+        # The guard is for the destructive one only. Making pause two-step
+        # would be friction with nothing to protect.
+        mid = await self._mission()
+        out = await tools.dispatch_tool("pause_mission", {"mission": "billing fix"})
+        self.assertEqual(self.c.missions.get(mid).status, "paused")
+        self.assertNotIn("confirm", out)
+
+
+class TheTierGateIsEnforcedNotJustDeclaredTests(ToolsDispatch):
+    """`tier` has to mean something.
+
+    Borrowed from project-yuri, which declares a permissionTier on all ~35 of
+    its tools and enforces it nowhere: the whole gate there is a console.log
+    reminding the daemon that the model *should* have asked
+    (apps/daemon/src/agents/tool-agent.ts:728-732). A declaration that reads as
+    protection and isn't is worse than no declaration, and it is the exact
+    mechanism that let Yuri cancel a mission nobody named.
+    """
+
+    def setUp(self):
+        super().setUp()
+        tools._pending_confirm = None
+
+    def tearDown(self):
+        tools._pending_confirm = None
+        super().tearDown()
+
+    def test_every_tool_declares_a_known_tier(self):
+        for d in tools.TOOL_DEFINITIONS:
+            tier = d.get("tier", "safe")
+            self.assertIn(tier, ("safe", "confirm"), d["name"])
+
+    def test_exactly_these_tools_ask_before_acting(self):
+        # If this list grows, that is a decision someone should have to make
+        # deliberately — the tier is where irreversibility gets declared. Each
+        # entry needs a reason, and here they are:
+        #
+        #   cancel_mission — ends work and stops running agents.
+        #   start_mission  — spec §14.1: the plan is read back and agreed to
+        #                    before anything runs, because a misheard plan
+        #                    that runs unseen is the failure spoken authoring
+        #                    causes that the user cannot undo. The tier is the
+        #                    mechanism because dispatch_tool then ENFORCES the
+        #                    gate rather than trusting the handler.
+        #   skip_task      — a skipped step satisfies its dependents exactly
+        #                    as a completed one does, so skipping a test or a
+        #                    review means the mission finishes with that check
+        #                    never having run.
+        self.assertEqual(sorted(tools.confirm_tools()),
+                         ["cancel_mission", "skip_task", "start_mission"])
+
+    def test_tier_of_defaults_to_safe_including_for_an_unknown_name(self):
+        self.assertEqual(tools.tier_of("list_projects"), "safe")
+        self.assertEqual(tools.tier_of("no_such_tool"), "safe")
+
+    async def test_a_confirm_tool_that_skips_the_gate_raises(self):
+        """The central half. A confirm-tier tool whose handler forgets to
+        consult the gate must fail loudly, not run ungated — a silent version
+        of this bug is the one that ships."""
+        original = tools.TOOL_DEFINITIONS
+
+        async def ungated(name, args):
+            return {"ok": "ran without asking anyone"}
+
+        with mock.patch.object(tools, "_dispatch", ungated):
+            with self.assertRaises(AssertionError) as ctx:
+                await tools.dispatch_tool("cancel_mission", {})
+        self.assertIn("cancel_mission", str(ctx.exception))
+        self.assertIn("confirm", str(ctx.exception))
+        self.assertIs(tools.TOOL_DEFINITIONS, original)
+
+    async def test_a_safe_tool_needs_no_gate_and_is_not_flagged(self):
+        # The enforcement must not turn every tool into a two-step.
+        out = await tools.dispatch_tool("list_projects", {})
+        self.assertIsInstance(out, dict)
+
+    async def test_the_gate_is_reset_per_call_so_one_consult_cannot_cover_two(self):
+        # Without the per-call reset, a confirm tool consulted once would leave
+        # the flag set and the NEXT ungated call would pass the check.
+        mid = await self._mission("billing fix")
+        await tools.dispatch_tool("cancel_mission", {"mission": "billing fix"})
+
+        async def ungated(name, args):
+            return {"ok": True}
+
+        with mock.patch.object(tools, "_dispatch", ungated):
+            with self.assertRaises(AssertionError):
+                await tools.dispatch_tool("cancel_mission", {})
+        self.assertNotEqual(self.c.missions.get(mid).status, "cancelled")
+
+    async def test_an_arm_for_one_tool_cannot_be_spent_on_another(self):
+        # The gate is keyed on (tool, target). Keying it on the target alone
+        # would let a token armed by one tool authorise a different one.
+        mid = await self._mission("billing fix")
+        armed = await tools.dispatch_tool("cancel_mission", {"mission": "billing fix"})
+        # The gate returns None to mean "proceed" and a fresh token to mean
+        # "refused, read this back". A token armed by cancel_mission must not
+        # authorise a different tool acting on the same target.
+        refused = tools._confirm_gate("some_other_tool", mid, armed["confirm"])
+        self.assertIsNotNone(refused,
+                             "a token armed by cancel_mission authorised another tool")
+        self.assertNotEqual(self.c.missions.get(mid).status, "cancelled")
+
+    async def _mission(self, title="billing fix"):
+        tools._last_start = None
+        out = await tools.dispatch_tool("start_session",
+                                        {"project_path": "proj", "name": title})
+        return out["mission_id"]

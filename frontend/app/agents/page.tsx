@@ -14,6 +14,8 @@
 // renders an error instead of an empty list.
 import { useCallback, useEffect, useState } from "react";
 import { useYuri, type Agent } from "@/components/VoiceProvider";
+import { McpServers } from "@/components/McpServers";
+import { Roster } from "@/components/Roster";
 import { ViewError } from "@/components/ViewError";
 
 const CAP_LABEL: Record<string, string> = {
@@ -59,10 +61,20 @@ export default function Page() {
     <div className="agents-view">
       <h2 className="viewtitle">Agents</h2>
 
+      {/* Section one: the agents themselves. */}
+      <Roster />
+
+      {/* Section two: what runs them. Relabelled from "Agents" — this table
+          is the provider health, and calling both things agents is what made
+          the panel ambiguous. */}
+      <section className="engines">
+      <h3 className="sectitle">Engines</h3>
+      <p className="mcp-blurb">The runtimes your agents run on.</p>
+
       {loadError ? (
         <ViewError error={loadError} onRetry={() => void load()} />
       ) : agents.length === 0 ? (
-        <div className="empty">No agents registered.</div>
+        <div className="empty">No engines registered.</div>
       ) : (
         <div className="agents-list">
           {agents.map((a) => (
@@ -70,6 +82,12 @@ export default function Page() {
           ))}
         </div>
       )}
+      </section>
+
+      {/* Section three: the services that give HER tools, as opposed to the
+          agents she delegates work to. Loads and fails independently — a
+          backend that cannot list MCP servers should not blank the roster. */}
+      <McpServers />
     </div>
   );
 }

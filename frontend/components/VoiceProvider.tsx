@@ -37,6 +37,7 @@ import {
 } from "@/lib/voice";
 import {
   INSTRUCTIONS,
+  capabilityBlock,
   yuriContextBlock,
   // Aliased: lib/instructions.ts already exports a type named `YuriContext`
   // (the connect-time snapshot of home/memory/journal/missions/agents) which
@@ -57,9 +58,12 @@ import {
   type NarrationMode,
   type SpokenGate,
 } from "@/lib/narration";
+import { nextUnanswered, pollVerdict, type ToolEnvelope } from "@/lib/polling";
 import { type TimelineItem } from "@/lib/timeline";
 import { type Sess } from "@/lib/sessions";
+import { type ToolDef } from "@/lib/voice";
 import { MODEL_OPTIONS, connectionParams, PROVIDER_LABEL } from "@/lib/voiceui";
+import { canTypeToProvider } from "@/lib/compose";
 import type { DebugEvent } from "./ActivityFeed";
 
 export type Pending = { sessionId: string; kind: string; text: string; options: string[] } | null;
@@ -114,6 +118,11 @@ export type YuriContext = {
   // conversation
   timeline: TimelineItem[];
   pending: Pending; // the live prompt card, or null
+  // Type instead of speak. The text enters THIS conversation as the user's own
+  // turn (it shows up in `timeline` like a spoken one) and Yuri answers it in
+  // the same thread. Rejects — rather than swallowing the text — when voice is
+  // not connected or the transport can't carry a typed turn.
+  say: (text: string) => Promise<void>;
 
   // shared data the nav badges and every view read
   sessions: Sess[];
@@ -150,6 +159,9 @@ export type YuriContext = {
   voiceUsage: VoiceUsage | null;
   narrationBusy: boolean;
   orbRef: RefObject<HTMLDivElement | null>;
+  // Live audio loudness (0..1) for the canvas orb. A ref so reading it every
+  // frame costs no re-render.
+  ampRef: RefObject<number>;
   glowRef: RefObject<HTMLDivElement | null>;
   modeBusy: string | null;
   switchMode: (handle: string, mode: string) => Promise<void>;
@@ -228,6 +240,9 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
   // Per-stream analysers feeding ONE smoothed --amp: keyed by source so the
   // mic and the assistant audio can both drive the orb without clobbering
   // each other. smoothed holds the envelope state across rAF frames.
+  // Live loudness in 0..1, the louder of mic and her own speech, envelope
+  // smoothed. Read by components/shell/Orb.tsx's frame loop.
+  const ampRef = useRef(0);
   const analysersRef = useRef<Map<"mic" | "remote", { analyser: AnalyserNode; buf: Uint8Array }>>(
     new Map(),
   );
@@ -313,15 +328,23 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
 
   // Shared tool dispatch: every /api/tools/execute call in this file (and any
   // view) goes through here so the fetch shape lives in exactly one place.
-  const callTool = useCallback(async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+  // The full {ok, error, result} envelope. `callTool` below returns only
+  // `.result`, which means a soft error ({ok:false}) reaches its caller as
+  // `undefined` with the reason thrown away — the poll loop read exactly that
+  // as "still working" and asked a dead session the same question every 1.5s
+  // forever. Anything that needs to tell an error from a result uses this.
+  const execTool = useCallback(async (name: string, args: Record<string, unknown>): Promise<ToolEnvelope> => {
     const r = await fetch("/api/tools/execute", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ name, arguments: args }),
     });
-    const data = await r.json();
-    return data?.result;
+    return (await r.json()) as ToolEnvelope;
   }, []);
+
+  const callTool = useCallback(async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+    return (await execTool(name, args))?.result;
+  }, [execTool]);
 
   // A background Claude turn reached a result — surface any prompt in the UI and
   // tell the voice model to narrate it (works even mid-conversation).
@@ -359,20 +382,36 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
 
   const pollSession = (sessionId: string) => {
     if (!sessionId || pollTimers.current.has(sessionId)) return;
-    // Keep polling until the backend reports idle. On any non-working,
-    // non-idle response, surface it and KEEP polling so we drain queued results
-    // (poll_status returns one buffered result per call, FIFO).
+    // Keep polling until the backend reports idle, draining queued results as
+    // they come (poll_status hands back one buffered result per call, FIFO).
+    //
+    // Every exit condition lives in lib/polling.ts so it can be tested: a
+    // session the backend has forgotten stops the loop immediately, and a
+    // genuinely transient failure is retried but bounded. This used to treat
+    // every unusable response as "keep going", which produced 329 log events
+    // for one stopped session and would have produced them indefinitely.
+    let unanswered = 0;
     const timer = setInterval(async () => {
+      let env: ToolEnvelope;
       try {
-        const res: any = await callTool("poll_session", { session_id: sessionId });
-        if (!res || res.status === "working") return;     // keep polling
-        if (res.status === "idle") {                       // queue drained, stop
-          stopPolling(sessionId);
-          return;
-        }
-        handleClaudeResult(res);                           // drain & keep polling
-      } catch {
-        /* transient; keep polling */
+        env = await execTool("poll_session", { session_id: sessionId });
+      } catch (e) {
+        // The request itself failed (backend down, network). Same bound.
+        env = { ok: false, error: (e as Error)?.message || "the request failed" };
+      }
+      const verdict = pollVerdict(env, unanswered);
+      unanswered = nextUnanswered(env, unanswered);
+      if (verdict.action === "wait") return;
+      if (verdict.action === "handle") {
+        handleClaudeResult(env?.result);
+        return;
+      }
+      stopPolling(sessionId);
+      // `idle` is the ordinary exit and says nothing; anything else is a
+      // reason the user may need, and one line beats an endless stream.
+      if (verdict.reason !== "idle") {
+        logDebug("poll", `stopped polling: ${verdict.reason}`, { session: sessionId },
+                 "backend", "voice");
       }
     }, 1500);
     pollTimers.current.set(sessionId, timer);
@@ -823,6 +862,12 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     // Envelope: snap up quickly, ease down slowly.
     const k = target > smoothedRef.current ? 0.35 : 0.08;
     smoothedRef.current += (target - smoothedRef.current) * k;
+    // The canvas orb reads this every frame. It used to be written only as a
+    // CSS variable on the DOM orb, which the Yuri OS re-shell deleted — so
+    // this envelope was computed 60 times a second and thrown away, and every
+    // one of her states looked the same. A ref, not state: the orb must not
+    // re-render at audio rate.
+    ampRef.current = smoothedRef.current;
     const amp = smoothedRef.current.toFixed(3);
     orbRef.current?.style.setProperty("--amp", amp);
     glowRef.current?.style.setProperty("--amp", amp);
@@ -1007,10 +1052,27 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     } catch {
       logDebug("error", "yuri context unavailable at connect", undefined, "voice", "backend");
     }
+    // The tools she is about to be given, fetched here so the capability map in
+    // her instructions is built from the SAME payload the transport hands the
+    // model — one list rendered twice, with no second source to drift. The
+    // transports fetch it again for the declarations themselves; that costs one
+    // extra request against localhost and buys the guarantee.
+    let toolDefs: ToolDef[] = [];
+    try {
+      const r = await fetch("/api/tools", { headers: authHeaders() });
+      if (r.ok) toolDefs = (await r.json()).tools || [];
+    } catch {
+      // Empty renders no map at all rather than a wrong one. She then falls
+      // back to describing herself from the persona, which says her tools are
+      // listed below — honest about not knowing beats inventing a list.
+      logDebug("error", "tool list unavailable at connect", undefined, "voice", "backend");
+    }
+
     const params = connectionParams(provider, model);
     const opts: RealtimeOptions = {
       ...params,
-      instructions: INSTRUCTIONS + dynamicContext(snapshot) + yuriContextBlock(yuriCtx),
+      instructions: INSTRUCTIONS + dynamicContext(snapshot) + yuriContextBlock(yuriCtx)
+                    + capabilityBlock(toolDefs),
       backend,
       onEvent,
       onDebug: (msg) => logDebug("info", `transport: ${msg}`, undefined, "voice", "backend"),
@@ -1083,6 +1145,33 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     setVstate("idle");
     setMuted(false);
     setPending(null);
+  };
+
+  // Type instead of speak. Deliberately routed through the SAME voice session
+  // and the SAME timeline as a spoken turn, because the dock shows exactly one
+  // conversation: its composer used to call tell_claude, so typed text reached
+  // an agent session while the panel above kept showing Yuri's transcript, and
+  // the user saw nothing happen. Messaging an agent directly still exists —
+  // it's the per-session composer on /sessions, where the reply is visible.
+  const say = async (text: string) => {
+    const t = text.trim();
+    if (!t) return;
+    if (!canTypeToProvider(provider)) {
+      throw new Error(`${PROVIDER_LABEL[provider]} voice can't take typed messages.`);
+    }
+    const s = sessionRef.current;
+    if (!s) throw new Error("Voice isn't connected — connect first, then type.");
+    // Send BEFORE rendering: sendText throws when the transport is down, and a
+    // turn that never left must not appear in the thread as though it had.
+    s.sendText(t);
+    // Render it exactly the way a spoken turn arrives, through the same event
+    // path — neither transport echoes a typed turn back as a transcript
+    // (OpenAI input transcription is off; Gemini only transcribes audio), so
+    // without this the user's own message would never appear at all.
+    onEvent({ type: "transcript", role: "user", text: t, final: true });
+    // She is about to answer; show it immediately rather than waiting for the
+    // transport's first state event, which can be a second away.
+    setVstate("thinking");
   };
 
   const toggleMute = () => {
@@ -1171,6 +1260,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
 
       timeline,
       pending,
+      say,
 
       sessions,
       approvals,
@@ -1194,6 +1284,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
       voiceUsage,
       narrationBusy,
       orbRef,
+      ampRef,
       glowRef,
       modeBusy,
       switchMode,
@@ -1215,6 +1306,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
       setModel,
       timeline,
       pending,
+      say,
       sessions,
       approvals,
       missions,

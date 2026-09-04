@@ -149,6 +149,11 @@ class _Handle:
     in_flight: bool = False     # a turn we started and have not reported
     msg_seen: int = 0           # /message entries already reported
     pending: _Pending | None = None   # the ask poll surfaced; answer replies to it
+    # The specialist slug this session was launched with, if any (spec §5.2).
+    # Recorded here rather than re-derived from the server: /api/session's own
+    # response (captured in `new_session()`/list_native() above) has no field
+    # for it, so the only place this is known at all is the request we made.
+    agent: str | None = None
 
 
 def _ordered(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -592,7 +597,13 @@ class OpenCodeProvider(AgentProvider):
             interactive_terminal=False, slash_commands=False, send_keys=False,
             permission_modes=(), supports_interrupt=True,
             supports_rehydrate=True, supports_resume=False,
-            supports_events=False, cost_tracking=True)
+            supports_events=False, cost_tracking=True,
+            # `POST /session` accepts an `agent` name, and OpenCode's own Agent
+            # schema carries `prompt`. The definition has to exist in its config
+            # first — `GET /api/agent` is read-only — which is what
+            # OpenCodeMaterialiser writes. Measured against a live
+            # `opencode serve` on 2026-09-04.
+            supports_personas=True)
 
     async def health(self) -> AgentHealth:
         """A pure probe, deliberately — never `acquire()`.
@@ -644,13 +655,20 @@ class OpenCodeProvider(AgentProvider):
         ref = _model_ref(model)
         if ref is not None:
             body["model"] = ref
+        # Only include "agent" when actually set. `{"agent": null}` is a
+        # different request from omitting the key entirely, so sending it for
+        # the (common) no-persona case would be asserting something about the
+        # session -- "no agent" -- that was never actually decided here.
+        if opts.agent_slug is not None:
+            body["agent"] = opts.agent_slug
         data = await self._arun(self._create(body))
         handle = str(data.get("id") or "")
         if not handle:
             raise OpenCodeError("OpenCode created a session without an id")
         location = data.get("location") or {}
         self._handles[handle] = _Handle(
-            cwd=str(location.get("directory") or project.root_path), model=model)
+            cwd=str(location.get("directory") or project.root_path), model=model,
+            agent=opts.agent_slug)
         return handle
 
     async def _create(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -969,7 +987,7 @@ class OpenCodeProvider(AgentProvider):
                 continue
             location = session.get("location") or {}
             model = session.get("model")
-            out.append({
+            entry = {
                 "handle": handle, "session_id": handle,
                 "cwd": str(location.get("directory") or h.cwd),
                 "model": _model_name(model) or (h.model or ""),
@@ -978,7 +996,10 @@ class OpenCodeProvider(AgentProvider):
                 "cost_usd": round(float(session.get("cost") or 0.0), 4),
                 "queued": 0,                    # /prompt queues server-side
                 "backend": self.id,
-            })
+            }
+            if h.agent:
+                entry["agent"] = h.agent
+            out.append(entry)
         return out
 
     async def _sessions(self) -> list[Any]:

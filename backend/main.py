@@ -35,9 +35,10 @@ import config
 import event_log
 from cost_log import COST_LOG_PATH, append_cost_event
 from tmux_runner import validate_session_id
-from tools import TOOL_DEFINITIONS, dispatch_tool
+from tools import all_tools, dispatch_tool, tools_for_model
 from yuri import app as yuri_app
 from yuri.api.routes import build_router
+from yuri.own.search import SearchUnavailable
 from yuri.providers.base import ProviderUnavailable
 
 # .env is loaded once, by `import config` above. No second load here: a CWD-based
@@ -153,6 +154,23 @@ async def lifespan(_: FastAPI):
                          [s.get("name") or s["handle"][:8] for s in restored])
         except Exception:
             log.exception("CLI session rehydration failed (continuing without it)")
+        try:
+            # AFTER the rehydrate, and that order is the whole design (spec
+            # §13): reconcile decides a task's fate from whether its session
+            # came back, so running it first would call every session lost and
+            # re-run work that is still in flight.
+            recon = await c.workflow.reconcile()
+            if recon["workflows"]:
+                log.info(
+                    "reconciled %d workflow(s): %d task(s) kept, %d never started, "
+                    "%d lost their agent, %d re-verified",
+                    recon["workflows"], len(recon["kept"]), len(recon["restarted"]),
+                    len(recon["lost"]), len(recon["reverified"]))
+        except Exception:
+            # A mission that cannot be recovered must not stop the backend
+            # from serving. The tasks stay as they were, which the UI shows,
+            # and the user can retry by hand.
+            log.exception("workflow reconciliation failed (continuing without it)")
     yield
     # Reverse order: Yuri's shutdown publishes/bridges its last events, so the
     # debug writer has to outlive it.
@@ -308,7 +326,10 @@ async def health() -> dict[str, str]:
 
 @app.get("/tools", dependencies=[Depends(require_auth)])
 async def list_tools() -> dict[str, Any]:
-    return {"tools": TOOL_DEFINITIONS}
+    # all_tools(), not TOOL_DEFINITIONS: the frontend builds her capability map
+    # from this payload, so a tool from a connected MCP server has to appear
+    # here or she is holding a tool she has not been told she has.
+    return {"tools": all_tools()}
 
 
 @app.get("/voice/models", dependencies=[Depends(require_auth)])
@@ -344,7 +365,7 @@ def _mint_config(
         # stays minimal.
         session_cfg: dict[str, Any] = {
             "type": "realtime", "model": model,
-            "tools": TOOL_DEFINITIONS, "tool_choice": "auto",
+            "tools": tools_for_model(), "tool_choice": "auto",
             # Lock output to audio so the model never emits a text-only message
             # item that goes unspoken. Azure binds config at mint time and
             # ignores the client session.update, so it MUST be set here (the
@@ -705,8 +726,8 @@ async def execute_tool(req: ToolCallRequest) -> dict[str, Any]:
         log.info("tool %s unsupported: %s", req.name, exc)
         event_log.log_event("backend", "voice", "error", f"{req.name}: {exc}", session=sid)
         return {"ok": False, "error": str(exc)}
-    except ProviderUnavailable as exc:
-        # A provider that cannot serve wrote an actionable message about how to
+    except (ProviderUnavailable, SearchUnavailable) as exc:
+        # Something that cannot serve wrote an actionable message about how to
         # fix it; the generic handler below would throw that away. Soft, like
         # YuriUnavailable above, so the model relays it instead of retrying.
         log.warning("tool %s: provider unavailable: %s", req.name, exc)
