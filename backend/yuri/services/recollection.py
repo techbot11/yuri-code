@@ -19,6 +19,7 @@ store; `core_block` is the one impure entry point.
 from __future__ import annotations
 
 from yuri.domain.memory import Memory
+from yuri.services._util import STOPWORDS
 
 # About what memory + journal occupy in her prompt today (405 + 2000 of a
 # measured 10,273 chars), spent on curated memories instead of a log tail.
@@ -124,3 +125,69 @@ def core_block(repo, project_slugs: list[str]) -> str:
     rows = repo.current(limit=400)
     chosen, omitted = select_core(rows, project_slugs)
     return render_core(chosen, omitted)
+
+
+# --- supersede resolution (spec §5.1) --------------------------------------
+
+
+def _preview(rows: list[Memory], limit: int = 6) -> str:
+    shown = [f'"{m.body}"' for m in rows[:limit]]
+    more = len(rows) - len(shown)
+    return ", ".join(shown) + (f", and {more} more" if more > 0 else "")
+
+
+def resolve_replaces(phrase: str, rows: list[Memory]) -> Memory:
+    """Resolve "the bit about language" to the memory it means.
+
+    She judges that one memory replaces another — that is what a model is
+    good at. This function's job is the opposite: to REFUSE when the phrase
+    could mean two things, because retiring the wrong rule is silent and
+    permanent. Same rule and the same stopword list as `_resolve_task`'s
+    spoken-step matcher.
+
+    Narrowest match first, so a phrase that IS a memory resolves before the
+    fuzzy pass runs at all.
+
+    **The last pass is deliberately loose** — a single shared meaningful word
+    resolves, so "the language thing" finds the language rule. That means it
+    can also resolve "old rule" to "the current rule" on `rule` alone. The
+    mitigation is not a tighter threshold (which would refuse real paraphrases)
+    but visibility: the `remember` tool returns WHICH memory it replaced, so
+    she says "I replaced X with Y" and a wrong resolution is audible
+    immediately rather than discovered later in the panel.
+    """
+    candidates = [m for m in rows if m.is_current]
+    if not candidates:
+        raise ValueError("there is nothing in memory to replace yet.")
+
+    ref = " ".join(str(phrase or "").split())
+    if not ref:
+        raise ValueError(
+            "which memory should this replace? Name a few words from it, or leave "
+            "replaces out to add this as a new memory.")
+
+    for m in candidates:
+        if m.id == ref:
+            return m
+
+    low = ref.lower()
+    exact = [m for m in candidates if m.body.lower() == low]
+    if len(exact) == 1:
+        return exact[0]
+
+    substring = [m for m in candidates if low in m.body.lower()]
+    if len(substring) == 1:
+        return substring[0]
+
+    words = {w for w in low.replace(",", " ").replace(".", " ").split()
+             if len(w) > 2 and w not in STOPWORDS}
+    hits = substring or [m for m in candidates
+                         if words and words & set(m.body.lower().split())]
+    if not hits:
+        raise ValueError(
+            f"no memory matches {ref!r}. What you remember: {_preview(candidates)}.")
+    if len(hits) > 1:
+        raise ValueError(
+            f"{ref!r} matches several memories: {_preview(hits)}. Read those back and "
+            "ask which one they mean, then pass a phrase that picks just that one.")
+    return hits[0]

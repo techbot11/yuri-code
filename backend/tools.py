@@ -24,6 +24,7 @@ import time
 from typing import Any
 
 from slash_commands import list_slash_commands
+from yuri.services._util import STOPWORDS as _STOPWORDS
 from yuri.app import container, container_or_none, stamp_last_spoke
 from yuri.mcp import naming as mcp_naming
 from yuri.mcp.jsonrpc import McpError
@@ -774,13 +775,10 @@ ERROR_SPEECH_MAX = 200
 # _running_mission_for(), which reads the store and so survives the reload
 # uvicorn does while the user is mid-sentence.
 _last_mission: dict[str, Any] | None = None
-# Words that carry no identifying information in a step title. Without this,
-# "run the tests" overlapped every title in the bug-fix template through
-# "the", and every spoken reference came back ambiguous.
-STOPWORDS: frozenset[str] = frozenset({
-    "the", "and", "for", "with", "into", "that", "this", "from", "step",
-    "task", "one", "its", "our", "any", "all", "out",
-})
+# Re-exported from yuri/services/_util.py, where it lives so that this
+# matcher and recollection.py's supersede matcher share ONE list. Two that
+# drift is how "run the tests" once matched every step in the plan.
+STOPWORDS = _STOPWORDS
 STEPS_SPEECH_MAX = 8
 # Which plan an ask gets, when the user did not name one.
 #
