@@ -13,6 +13,7 @@ from typing import Any, Iterable
 
 from yuri.domain.approval import Approval
 from yuri.domain.event import YuriEvent
+from yuri.domain.memory import Memory
 from yuri.domain.mission import Mission, MissionStep
 from yuri.domain.artifact import Artifact
 from yuri.domain.project import Project
@@ -20,13 +21,13 @@ from yuri.domain.session import LIVE_STATUSES, AgentSession
 from yuri.domain.specialist import Specialist
 from yuri.domain.task import Task
 from yuri.domain.workflow import LIVE_WORKFLOW, Workflow
-from .base import (ApprovalRepo, ArtifactRepo, EventRepo, LiveSessionExists, MissionRepo,
-                   PendingApprovalExists, ProjectRepo, SessionRepo, SettingsRepo,
-                   SpecialistRepo, Store, TaskRepo, WorkflowRepo)
+from .base import (ApprovalRepo, ArtifactRepo, EventRepo, LiveSessionExists, MemoryRepo,
+                   MissionRepo, PendingApprovalExists, ProjectRepo, SessionRepo,
+                   SettingsRepo, SpecialistRepo, Store, TaskRepo, WorkflowRepo)
 
 log = logging.getLogger("yuri.store.sqlite")
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _MIGRATIONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "migrations")
 
 # Columns serialised as JSON in both directions by _to_row/_from_row. Register
@@ -37,7 +38,10 @@ _JSON_COLS = {"metadata", "result", "runtime_metadata", "tool_input", "payload",
               "tools", "capabilities", "requires", "verification"}
 # Columns stored as 0/1 and read back as real bools. Miss one and
 # `if row.read_only:` works while `row.read_only is True` does not.
-_BOOL_COLS = {"auto_approve_edits", "speakable", "builtin", "archived", "read_only"}
+# `pinned` joins the registry for the reason the comment above gives. `embedding`
+# joins NEITHER registry: sqlite3 maps bytes to a BLOB natively, and putting it
+# in _JSON_COLS would store the repr of a bytes object with no error at all.
+_BOOL_COLS = {"auto_approve_edits", "speakable", "builtin", "archived", "read_only", "pinned"}
 
 
 class _Conn:
@@ -424,6 +428,52 @@ class SqliteSettings(SettingsRepo):
                               (key, json.dumps(value)))
 
 
+class SqliteMemories(_Base, MemoryRepo):
+    table, cls = "memories", Memory
+
+    def delete(self, id):
+        self._c.get().execute("DELETE FROM memories WHERE id = ?", (id,))
+
+    def current(self, kinds=None, subjects=None, limit=200):
+        where, args = ["superseded_by IS NULL"], []
+        if kinds:
+            where.append(f"kind IN ({', '.join('?' * len(kinds))})")
+            args.extend(kinds)
+        if subjects:
+            where.append(f"subject IN ({', '.join('?' * len(subjects))})")
+            args.extend(subjects)
+        return self._many(
+            f"SELECT * FROM memories WHERE {' AND '.join(where)} "
+            f"ORDER BY created_at DESC LIMIT ?", (*args, limit))
+
+    def for_subject(self, subject, limit=200):
+        return self._many(
+            "SELECT * FROM memories WHERE subject = ? AND superseded_by IS NULL "
+            "ORDER BY created_at DESC LIMIT ?", (subject, limit))
+
+    def superseded_of(self, id):
+        return self._many("SELECT * FROM memories WHERE superseded_by = ? "
+                          "ORDER BY created_at DESC", (id,))
+
+    def needing_embedding(self, limit=50):
+        return self._many(
+            "SELECT * FROM memories WHERE embedding IS NULL AND superseded_by IS NULL "
+            "ORDER BY created_at DESC LIMIT ?", (limit,))
+
+    def with_embeddings(self, limit=10_000):
+        return self._many(
+            "SELECT * FROM memories WHERE embedding IS NOT NULL AND superseded_by IS NULL "
+            "ORDER BY created_at DESC LIMIT ?", (limit,))
+
+    def by_body(self, body):
+        return self._one("SELECT * FROM memories WHERE body = ? AND superseded_by IS NULL "
+                         "LIMIT 1", (" ".join(str(body or "").split()),))
+
+    def count(self):
+        return self._c.get().execute(
+            "SELECT COUNT(*) FROM memories WHERE superseded_by IS NULL").fetchone()[0]
+
+
 class SqliteStore(Store):
     def __init__(self, path: str):
         self.path = path
@@ -439,6 +489,7 @@ class SqliteStore(Store):
         self.workflows = SqliteWorkflows(self._conn)
         self.tasks = SqliteTasks(self._conn)
         self.artifacts = SqliteArtifacts(self._conn)
+        self.memories = SqliteMemories(self._conn)
 
     def migrate(self) -> None:
         # 0002's partial unique index hardcodes the live statuses -- sqlite

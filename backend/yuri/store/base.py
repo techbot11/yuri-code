@@ -22,6 +22,7 @@ from typing import Any
 from yuri.domain.approval import Approval
 from yuri.domain.artifact import Artifact
 from yuri.domain.event import YuriEvent
+from yuri.domain.memory import Memory
 from yuri.domain.mission import Mission, MissionStep
 from yuri.domain.project import Project
 from yuri.domain.session import AgentSession
@@ -194,6 +195,39 @@ class ArtifactRepo(ABC):
     def for_task(self, task_id: str) -> list[Artifact]: ...
 
 
+class MemoryRepo(ABC):
+    @abstractmethod
+    def insert(self, m: Memory) -> None: ...
+    @abstractmethod
+    def get(self, id: str) -> Memory | None: ...
+    @abstractmethod
+    def update(self, m: Memory) -> None: ...
+    @abstractmethod
+    def delete(self, id: str) -> None: ...
+    @abstractmethod
+    def current(self, kinds: list[str] | None = None, subjects: list[str] | None = None,
+                limit: int = 200) -> list[Memory]:
+        """Non-superseded memories, newest first. `kinds` and `subjects` are
+        ORed within themselves and ANDed with each other."""
+    @abstractmethod
+    def for_subject(self, subject: str, limit: int = 200) -> list[Memory]: ...
+    @abstractmethod
+    def superseded_of(self, id: str) -> list[Memory]:
+        """What this memory replaced — the panel's history view."""
+    @abstractmethod
+    def needing_embedding(self, limit: int = 50) -> list[Memory]:
+        """Current rows with no vector. Superseded rows are excluded: they are
+        never sent to her, so embedding them is spend for nothing."""
+    @abstractmethod
+    def with_embeddings(self, limit: int = 10_000) -> list[Memory]: ...
+    @abstractmethod
+    def by_body(self, body: str) -> Memory | None:
+        """An exact CURRENT duplicate, for the dedup no-op (spec §5.4)."""
+    @abstractmethod
+    def count(self) -> int:
+        """How many current memories exist."""
+
+
 class EventRepo(ABC):
     @abstractmethod
     def insert(self, e: YuriEvent) -> None: ...
@@ -221,6 +255,8 @@ class Store(ABC):
     workflows: WorkflowRepo
     tasks: TaskRepo
     artifacts: ArtifactRepo
+    # Phase 8
+    memories: MemoryRepo
 
     @abstractmethod
     def migrate(self) -> None: ...
