@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from yuri.domain.memory import Memory
 from yuri.services._util import STOPWORDS
+from yuri.services.embedding import EmbeddingUnavailable, cosine
 
 # About what memory + journal occupy in her prompt today (405 + 2000 of a
 # measured 10,273 chars), spent on curated memories instead of a log tail.
@@ -191,3 +192,136 @@ def resolve_replaces(phrase: str, rows: list[Memory]) -> Memory:
             f"{ref!r} matches several memories: {_preview(hits)}. Read those back and "
             "ask which one they mean, then pass a phrase that picks just that one.")
     return hits[0]
+
+
+# --- recall (spec §4.2) -----------------------------------------------------
+#
+# Three paths, tried in order, because the cheap one is 6,000 times faster
+# than the slow one (0.22ms of SQL against a 1,370ms embedding call):
+#
+#   filtered  a subject or a date window narrows it enough that SQL answers.
+#   semantic  embed the query, score every embedded row by cosine.
+#   keyword   the embedder is unavailable — substring and recency, and it SAYS
+#             the ranking is not semantic rather than pretending.
+
+RECALL_MAX = 5
+RECALL_BODY_MAX = 300
+# Rows the semantic path will score. A write is NEVER refused for being the
+# ten-thousandth — declining to remember something because the store is full
+# is worse than a slower search — so this bounds the scan only, and the result
+# says when it was hit.
+SEMANTIC_SCAN_MAX = 10_000
+
+FILTERED, SEMANTIC, KEYWORD = "filtered", "semantic", "keyword"
+
+_SAID = {
+    "stated": "you told me",
+    "observed": "I saw",
+    "inferred": "I thought",
+}
+
+
+def _said(m: Memory) -> str:
+    """How a result is attributed. Her prompt separates what was SAID from
+    what was verified, and a memory is the former — so a result reads "you
+    told me on 2 Sep", never as a bare assertion."""
+    return f"{_SAID.get(m.source, 'you told me')} on {(m.created_at or '')[:10]}"
+
+
+def _result(m: Memory) -> dict:
+    body = m.body if len(m.body) <= RECALL_BODY_MAX else m.body[: RECALL_BODY_MAX - 1] + "…"
+    return {"body": body, "kind": m.kind, "source": m.source,
+            "when": (m.created_at or "")[:10], "said": _said(m),
+            "about": m.subject if m.subject != "user" else None}
+
+
+def _keywords(query: str) -> set[str]:
+    low = "".join(c if c.isalnum() else " " for c in (query or "").lower())
+    return {w for w in low.split() if len(w) > 2 and w not in STOPWORDS}
+
+
+def _answer(rows: list[Memory], matched: int, how: str, degraded: bool,
+            capped: int = 0) -> dict:
+    out = {"results": [_result(m) for m in rows[:RECALL_MAX]],
+           "matched": matched, "how": how, "degraded": degraded}
+    if not rows:
+        out["message"] = ("Nothing in memory matches that. Say so — do not invent "
+                          "something that sounds like it might be there.")
+        return out
+    # "Top 5 of 40" must never read as "there were 5".
+    more = (f" There are {matched} in total; these are the closest {len(out['results'])}."
+            if matched > len(out["results"]) else "")
+    warn = ("" if not degraded else
+            " I could not search by meaning, so these are matched on words and "
+            "recency — say that, and say the right one may not be here.")
+    # `capped` is the scan limit, passed ONLY when the scan actually hit it.
+    # An earlier version compared matched > scanned, which is never true when
+    # the scan is what capped the count — so the bound never announced itself.
+    limit = (f" I only looked at the {capped} most recent memories, so there may be older "
+             f"ones I did not see." if capped else "")
+    out["message"] = ("Read these back as things that were said, not as facts — each one "
+                      "carries who said it and when." + more + warn + limit)
+    return out
+
+
+async def recall(repo, embedder, query: str, subject: str | None = None,
+                 since: str | None = None) -> dict:
+    """Find memories. Cheap path first (spec §7.2).
+
+    `subject` or `since` means SQL can answer it, and SQL is 0.22ms against a
+    1.37s embedding call — so a question with either is never embedded at all.
+    Only a genuinely fuzzy query pays.
+    """
+    query = " ".join(str(query or "").split())
+
+    if subject or since:
+        rows = repo.for_subject(subject) if subject else repo.current(limit=400)
+        if since:
+            rows = [m for m in rows if (m.created_at or "") >= since]
+        if query:
+            # Rank within the filter by word overlap. No embedding: the filter
+            # has already done the narrowing that similarity would be for.
+            words = _keywords(query)
+            if words:
+                rows = sorted(
+                    rows,
+                    key=lambda m: (len(words & _keywords(m.body)), m.created_at),
+                    reverse=True)
+        return _answer(rows, len(rows), FILTERED, degraded=False)
+
+    if not query:
+        # Nothing to filter on and nothing to be similar to. The most recent
+        # is the only honest answer, and it says that is what it did.
+        rows = repo.current(limit=RECALL_MAX)
+        return _answer(rows, repo.count(), FILTERED, degraded=False)
+
+    candidates = repo.with_embeddings(limit=SEMANTIC_SCAN_MAX)
+    try:
+        if embedder is None:
+            raise EmbeddingUnavailable("no embedder is configured")
+        [vector] = await embedder.embed([query])
+    except EmbeddingUnavailable:
+        # Degraded, not broken. Everything is still findable; the ranking is
+        # just worse, and the caller is told so.
+        words = _keywords(query)
+        pool = repo.current(limit=400)
+        hits = [m for m in pool
+                if query.lower() in m.body.lower() or (words & _keywords(m.body))]
+        hits.sort(key=lambda m: (len(words & _keywords(m.body)), m.created_at), reverse=True)
+        return _answer(hits, len(hits), KEYWORD, degraded=True)
+
+    scored: list[tuple[float, Memory]] = []
+    for m in candidates:
+        try:
+            scored.append((cosine(vector, m.embedding), m))
+        except EmbeddingUnavailable:
+            # One malformed stored vector must not sink the whole search.
+            continue
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    rows = [m for _, m in scored]
+    # Asked for at most N and got exactly N: there may be more behind it, and
+    # saying so is the difference between "these are the closest" and "these
+    # are the closest of everything".
+    hit_the_cap = len(candidates) >= SEMANTIC_SCAN_MAX
+    return _answer(rows, len(rows), SEMANTIC, degraded=False,
+                   capped=SEMANTIC_SCAN_MAX if hit_the_cap else 0)
