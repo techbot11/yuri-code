@@ -8,7 +8,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from yuri.home import Home  # noqa: E402
 from yuri.services.journal import Journal  # noqa: E402
-from yuri.services.memory import BadSlug, Memory  # noqa: E402
 
 
 class JournalTests(unittest.TestCase):
@@ -57,90 +56,21 @@ class JournalTests(unittest.TestCase):
             tmp2.cleanup()
 
 
-class MemoryTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.home = Home(os.path.join(self.tmp.name, "Yuri")).ensure()
-        self.m = Memory(self.home)
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def test_remember_user(self):
-        path = self.m.remember("prefers pnpm over npm")
-        self.assertEqual(path, self.home.user_memory_path)
-        text = self.m.read_user()
-        self.assertRegex(text, r"- \d{4}-\d\d-\d\d  prefers pnpm over npm")
-
-    def test_remember_project(self):
-        path = self.m.remember("tests live in backend/tests", project_slug="yuri-code")
-        self.assertEqual(path, os.path.join(self.home.projects_memory_dir, "yuri-code.md"))
-        self.assertIn("tests live in", self.m.read_project("yuri-code"))
-
-    def test_bad_slug_rejected(self):
-        for bad in ["../etc", "a/b", "UPPER", "", "x" * 65, "sp ace"]:
-            with self.assertRaises(BadSlug):
-                self.m.remember("x", project_slug=bad)
-
-    def test_empty_fact_rejected(self):
-        with self.assertRaises(ValueError):
-            self.m.remember("   ")
-
-    def test_read_user_cap_keeps_tail(self):
-        for i in range(200):
-            self.m.remember(f"fact {i}")
-        out = self.m.read_user(cap=300)
-        self.assertLessEqual(len(out), 300)
-        self.assertIn("fact 199", out)  # most recent survives the cap
-
-    def test_project_header_written_once(self):
-        self.m.remember("first fact", project_slug="proj")
-        self.m.remember("second fact", project_slug="proj")
-        text = self.m.read_project("proj")
-        self.assertEqual(text.count("# Project notes: proj"), 1)
-
-    def test_read_project_never_written_returns_empty(self):
-        self.assertEqual(self.m.read_project("never-seen"), "")
-
-    def test_read_user_zero_and_negative_cap_return_empty(self):
-        self.m.remember("prefers pnpm over npm")
-        self.assertEqual(self.m.read_user(cap=0), "")
-        self.assertEqual(self.m.read_user(cap=-1), "")
-
-    def test_read_project_zero_and_negative_cap_return_empty(self):
-        self.m.remember("tests live in backend/tests", project_slug="yuri-code")
-        self.assertEqual(self.m.read_project("yuri-code", cap=0), "")
-        self.assertEqual(self.m.read_project("yuri-code", cap=-1), "")
-
-    def test_max_length_slug_accepted(self):
-        slug = "a" * 64
-        path = self.m.remember("ok", project_slug=slug)
-        self.assertEqual(path, os.path.join(self.home.projects_memory_dir, f"{slug}.md"))
-
-    def test_slug_with_null_byte_rejected(self):
-        with self.assertRaises(BadSlug):
-            self.m.remember("x", project_slug="a\x00b")
-
-    def test_slug_dot_and_dotdot_rejected(self):
-        for bad in [".", "..", "%2e%2e", "%2e%2e%2fetc"]:
-            with self.assertRaises(BadSlug):
-                self.m.remember("x", project_slug=bad)
-
-    def test_fact_containing_path_traversal_is_just_content(self):
-        path = self.m.remember("../../etc/passwd is not a path here")
-        self.assertEqual(path, self.home.user_memory_path)
-        real_memory_dir = os.path.realpath(self.home.memory_dir)
-        self.assertTrue(os.path.realpath(path).startswith(real_memory_dir + os.sep))
-
-    def test_remember_does_not_write_outside_memory_dir(self):
-        before = set(os.listdir(self.tmp.name))
-        try:
-            self.m.remember("x", project_slug="..")
-        except BadSlug:
-            pass
-        after = set(os.listdir(self.tmp.name))
-        self.assertEqual(before, after)
-
-
-if __name__ == "__main__":
-    unittest.main()
+# The MemoryTests class that stood here tested yuri/services/memory.py, the
+# append-only markdown writer. That service is deleted: memories are rows now
+# (migration 0005), and the files are read once by legacy_memory.py and never
+# written again.
+#
+# What its 19 tests protected, and where each property lives now:
+#
+#   * "a slug must be a slug" and path containment -> no longer reachable,
+#     because nothing writes a path per memory. The slug rule itself is now
+#     Memory.__post_init__'s subject validation, tested in
+#     test_memory_domain.py (a project memory needs a slug, and "../etc" is
+#     refused).
+#   * reading a file's tail under a cap -> replaced by the core tier, which
+#     selects whole memories by rule and SAYS what it left out, tested in
+#     test_core_tier.py. That is the bug this phase existed to fix: the tail
+#     cap dropped the oldest facts mid-line and kept 0 of 5 preferences.
+#   * appending a dated line -> legacy_memory.py reads that shape back on
+#     import, tested in test_legacy_memory.py against the user's real file.

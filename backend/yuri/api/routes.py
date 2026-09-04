@@ -20,6 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from yuri.app import container, last_spoke_at, narration_mode, set_narration_mode
+from yuri.domain.memory import InvalidMemory, Memory
 from yuri.domain.mission import InvalidTransition
 from yuri.domain.specialist import ROLE_PREFERENCE, ROLES, TASK_CAPABILITIES
 from yuri.domain.task import InvalidTaskTransition
@@ -31,14 +32,19 @@ from yuri.services.roster import DuplicateSpecialist, NoSpecialist, SpecialistIn
 from yuri.workflows.loader import (MAX_TASKS_PER_WORKFLOW, VERIFY_NAMES,
                                    TemplateError)
 from yuri.narration.policy import MODES
-from .schemas import (AssignBody, McpEnabled, McpServerBody, NarrationUpdate,
-                      ProjectCreate, SpecialistBody, WorkflowBody)
+from .schemas import (AssignBody, McpEnabled, McpServerBody, MemoryBody,
+                      MemorySearch, NarrationUpdate, ProjectCreate,
+                      SpecialistBody, SupersedeBody, WorkflowBody)
 
 ACTIVE = ("running", "waiting_for_approval", "paused", "queued")
 
 # A caller-supplied `limit` must never translate into an unbounded read of the
 # event log (state store or SSE replay) — clamp both endpoints that accept one.
 EVENTS_LIMIT_MAX = 1000
+
+# Today's journal in her prompt. Small: the core tier carries what she
+# REMEMBERS, and this only has to carry what just happened.
+JOURNAL_TODAY_MAX = 400
 
 
 def _clamp_limit(limit: int) -> int:
@@ -66,11 +72,28 @@ def build_router(require_auth: Callable) -> APIRouter:
         return {"home": c.home.path,
                 "now": datetime.datetime.now().astimezone().strftime("%A %d %B, %H:%M"),
                 "last_spoke_at": last_spoke_at(),
-                "memory_user": c.memory.read_user(),
-                # Filtered: the raw journal is mostly mission bookkeeping, so
-                # handing all of it over gives her a day with nothing in it
-                # but work. Nothing stops being recorded.
-                "journal_today": c.journal.read_today_personal(),
+                # The core tier (spec §4.1): pinned, then every preference
+                # (exempt from the budget), then facts, then the projects with
+                # live work, then the last three days. Bounded, and it SAYS
+                # what it left out.
+                #
+                # This replaces `memory_user` — the tail of a markdown file,
+                # which dropped the OLDEST facts mid-line and said nothing
+                # about it.
+                "memory_core": c.memories.core_block(_active_slugs()),
+                # Today's journal STAYS, at a fifth of its old cap.
+                #
+                # An earlier version of this change removed it, on the grounds
+                # that recall could reach it. That was wrong and a test caught
+                # it: `recall` searches MEMORIES, and today deliberately has
+                # no `day` summary (the day is not over), so today's activity
+                # would have been invisible to her — a regression from what
+                # she has now, dressed up as an improvement.
+                #
+                # 400 rather than 2000: on a real day the 2000 cap was already
+                # truncating, and what she needs is the last few things that
+                # happened, not a fifth of her prompt spent on a log.
+                "journal_today": c.journal.read_today_personal(cap=JOURNAL_TODAY_MAX),
                 "active_missions": [{"id": m.id, "title": m.title, "goal": m.goal, "status": m.status,
                                      "project": projects.get(m.project_id)} for m in missions],
                 "agents": [{"id": p.id, "name": p.name, **health[p.id].to_dict()} for p in c.registry.all()],
@@ -501,6 +524,140 @@ def build_router(require_auth: Callable) -> APIRouter:
         except KeyError as exc:
             raise HTTPException(404, str(exc)) from exc
         return {"artifacts": [a.to_dict() for a in c.store.artifacts.for_mission(mission_id)]}
+
+    # --- memory (spec §6) ---------------------------------------------------
+    def _active_slugs() -> list[str]:
+        """The projects with live work, which is what decides whose project
+        memories reach her prompt (spec §4.1 rule 4)."""
+        c = container()
+        projects = {p.id: p.slug for p in c.projects.registered()}
+        return sorted({projects[m.project_id] for m in c.missions.list()
+                       if m.status in ACTIVE and m.project_id in projects})
+
+    @r.get("/memories")
+    async def list_memories(include_superseded: bool = False):
+        """Everything she currently remembers, plus WHICH ONES ARE NOT
+        REACHING HER.
+
+        That last part is the point of the endpoint. The old store truncated
+        silently — it returned the tail of a file and said nothing — so the
+        panel's whole job is to make "this is in her prompt, that is not"
+        something you can see and fix by pinning.
+        """
+        c = container()
+        rows = c.memories.current(limit=400)
+        report = c.memories.budget_report(_active_slugs())
+        in_prompt = set(report["in_prompt"])
+        out = [{**m.to_dict(), "in_prompt": m.id in in_prompt,
+                # The vector is 3KB of float and means nothing to a reader.
+                "embedding": None, "embedded": m.embedding is not None}
+               for m in rows]
+        return {"memories": out, "budget": report}
+
+    @r.post("/memories", status_code=201)
+    async def create_memory(body: MemoryBody):
+        c = container()
+        try:
+            m = Memory(body=body.body or "", kind=body.kind or "fact",
+                       subject=body.subject or "user",
+                       source=body.source or "stated", origin="ui")
+        except InvalidMemory as exc:
+            # 400 naming the value, not a 500. The Phase 7 lesson.
+            raise HTTPException(400, str(exc)) from exc
+        if body.pinned:
+            m.pinned = True
+        existing = c.memories.duplicate_of(m.body)
+        if existing is not None:
+            raise HTTPException(409, "you already remember that, word for word")
+        return c.memories.add(m).to_dict() | {"embedding": None}
+
+    @r.put("/memories/{memory_id}")
+    async def edit_memory(memory_id: str, body: MemoryBody):
+        c = container()
+        try:
+            m = c.memories.get(memory_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        fields = body.model_dump(exclude_unset=True)
+        for key in ("body", "kind", "subject", "source", "pinned"):
+            if key in fields and fields[key] is not None:
+                setattr(m, key, fields[key])
+        try:
+            # Re-runs the domain's own validation, including the
+            # subject-must-match-kind rule, rather than duplicating it here.
+            m.__post_init__()
+        except InvalidMemory as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if "body" in fields:
+            # The text changed, so the old vector describes the old text.
+            # Cleared, and the worker re-embeds it — a stale vector would rank
+            # this memory by something it no longer says.
+            m.embedding = None
+        return c.memories.edit(m).to_dict() | {"embedding": None}
+
+    @r.delete("/memories/{memory_id}")
+    async def delete_memory(memory_id: str):
+        """A hard delete, and the only one. No voice tool reaches this: losing
+        a memory on a mishearing is not recoverable."""
+        c = container()
+        try:
+            c.memories.get(memory_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        c.memories.delete(memory_id)
+        return {"deleted": memory_id}
+
+    @r.post("/memories/{memory_id}/supersede")
+    async def supersede_memory(memory_id: str, body: SupersedeBody):
+        c = container()
+        try:
+            victim = c.memories.get(memory_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        if body.by:
+            try:
+                replacement = c.memories.get(body.by)
+            except KeyError as exc:
+                raise HTTPException(404, str(exc)) from exc
+        elif (body.body or "").strip():
+            try:
+                replacement = c.memories.add(Memory(
+                    body=body.body or "", kind=victim.kind, subject=victim.subject,
+                    source="stated", origin="ui"))
+            except InvalidMemory as exc:
+                raise HTTPException(400, str(exc)) from exc
+        else:
+            raise HTTPException(400, "give either `by` (an existing memory's id) or `body` "
+                                     "(the text of the one that replaces it)")
+        if replacement.id == victim.id:
+            raise HTTPException(400, "a memory cannot supersede itself")
+        c.memories.supersede(victim, replacement)
+        return {"superseded": victim.id, "by": replacement.id}
+
+    @r.get("/memories/{memory_id}/history")
+    async def memory_history(memory_id: str):
+        """What this memory replaced. Superseded rows are kept, never deleted
+        — "you used to want X" is occasionally the answer."""
+        c = container()
+        try:
+            c.memories.get(memory_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return {"replaced": [m.to_dict() | {"embedding": None}
+                             for m in c.memories.history(memory_id)]}
+
+    @r.post("/memories/search")
+    async def search_memories(body: MemorySearch):
+        """The panel's search box, and the same path `recall` uses — so what
+        the user sees here is what she would find."""
+        c = container()
+        slug = None
+        if body.project:
+            try:
+                slug = c.projects.resolve_or_create(body.project).slug
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        return await c.memories.recall(body.query, subject=slug, since=body.since)
 
     # --- MCP servers --------------------------------------------------------
     #

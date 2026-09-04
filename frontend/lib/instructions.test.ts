@@ -66,7 +66,7 @@ test("context block leads with the moment and the person, not the work", () => {
     home: "/Users/x/Yuri",
     now: "Thursday 04 September, 11:52",
     last_spoke_at: "2026-09-04T09:10:00Z",
-    memory_user: "- 2026-09-02  prefers pnpm",
+    memory_core: "WHAT YOU REMEMBER ABOUT THEM:\n- prefers pnpm (you told me, 2026-09-02)",
     journal_today: "- 09:00  he mentioned his sister is visiting",
     active_missions: [{ id: "m", title: "fix", goal: "make tests pass", status: "running", project: "pm-tool" }],
     agents: [{ id: "claude-code", name: "Claude Code", online: false }],
@@ -89,7 +89,7 @@ test("with nothing running, the block says nothing about work at all", () => {
   // MISSIONS: none" invited her to report on it.
   const out = yuriContextBlock({
     home: "h", now: "Thursday 04 September, 11:52", last_spoke_at: null,
-    memory_user: "", journal_today: "", active_missions: [], agents: [],
+    memory_core: "", journal_today: "", active_missions: [], agents: [],
   });
   assert.ok(!/WORK RUNNING/.test(out));
   assert.ok(!/MISSION/i.test(out));
@@ -99,23 +99,47 @@ test("with nothing running, the block says nothing about work at all", () => {
 
 test("a missing time or last-spoke degrades without inventing one", () => {
   const out = yuriContextBlock({
-    home: "h", memory_user: "", journal_today: "", active_missions: [], agents: [],
+    home: "h", memory_core: "", journal_today: "", active_missions: [], agents: [],
   });
   assert.ok(!/RIGHT NOW/.test(out), "rendered a time it does not have");
   assert.ok(/first time/i.test(out));
 });
 
-test("memory is capped to its tail", () => {
-  const out = yuriContextBlock({ home: "h", memory_user: "a".repeat(5000) + "END", journal_today: "", active_missions: [], agents: [] });
-  assert.ok(out.includes("END"));
-  assert.ok(!out.includes("a".repeat(4500)));
+test("the core tier is passed through as the backend rendered it", () => {
+  // It is NOT re-capped here. The old code kept the tail of a 4000-char blob,
+  // which is exactly the bug this phase fixed: select_core already chose whole
+  // memories against a budget and appended a line naming what it left out, so
+  // trimming it again here would cut that line off — hiding the omission the
+  // whole design exists to surface.
+  const block = "WHAT YOU REMEMBER ABOUT THEM:\n- one (you told me, 2026-09-01)\n" +
+    "(4 more memories not shown — use recall if the conversation needs something)";
+  const out = yuriContextBlock({ home: "h", memory_core: block, journal_today: "",
+                                 active_missions: [], agents: [] });
+  assert.ok(out.includes("4 more memories not shown"));
+  assert.ok(out.includes("- one (you told me, 2026-09-01)"));
+});
+
+test("an empty core tier says so plainly instead of an empty heading", () => {
+  const out = yuriContextBlock({ home: "h", memory_core: "", journal_today: "",
+                                 active_missions: [], agents: [] });
+  assert.ok(/nothing yet/.test(out));
+  assert.ok(/remember/.test(out));
+});
+
+test("today's journal is still there, because recall cannot reach today", () => {
+  // Removing it made today invisible: recall searches MEMORIES, and today has
+  // no day summary yet because the day is not over. A test caught that.
+  const out = yuriContextBlock({ home: "h", memory_core: "", active_missions: [], agents: [],
+                                 journal_today: "- 09:00  his sister is visiting" });
+  assert.ok(out.includes("YOUR DAY SO FAR"));
+  assert.ok(out.includes("sister is visiting"));
 });
 
 test("the context block carries the remembered narration mode", () => {
   // Design section 6: a fresh voice session knows the mode without being told,
   // which is what makes OPERATING's "if it's already quiet don't apologise for
   // being quiet" actionable.
-  const base = { home: "h", memory_user: "", journal_today: "", active_missions: [], agents: [] };
+  const base = { home: "h", memory_core: "", journal_today: "", active_missions: [], agents: [] };
   const quiet = yuriContextBlock({ ...base, narration_mode: "quiet" });
   assert.ok(quiet.includes("YOUR NARRATION MODE: quiet"));
   assert.ok(yuriContextBlock({ ...base, narration_mode: "verbose" }).includes("verbose"));

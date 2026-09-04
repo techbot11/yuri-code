@@ -222,12 +222,17 @@ class YuriApi(unittest.IsolatedAsyncioTestCase):
         self.c.store.events.insert(YuriEvent.make(EventType.TOOL_STARTED, mission_id=out["mission_id"]))
         evs = self.client.get(f"/yuri/events?mission_id={out['mission_id']}").json()["events"]
         self.assertEqual(evs[-1]["type"], "tool.started")
-        self.c.memory.remember("likes tea")
+        from yuri.domain.memory import Memory
+        self.c.memories.add(Memory(body="likes tea", kind="fact"))
         ctx = self.client.get("/yuri/context").json()
-        self.assertEqual(set(ctx), {"home", "now", "last_spoke_at", "memory_user",
+        # `memory_user` is gone — the core tier replaces it. `journal_today`
+        # STAYS, at a fifth of its old cap: recall searches memories, and
+        # today has no day summary yet, so removing it would have made today
+        # invisible to her.
+        self.assertEqual(set(ctx), {"home", "now", "last_spoke_at", "memory_core",
                                     "journal_today", "active_missions", "agents",
                                     "narration_mode"})
-        self.assertIn("likes tea", ctx["memory_user"])
+        self.assertIn("likes tea", ctx["memory_core"])
         self.assertEqual(ctx["active_missions"][0]["title"], "s1")
         self.assertEqual(ctx["agents"][0]["id"], "fake")
 

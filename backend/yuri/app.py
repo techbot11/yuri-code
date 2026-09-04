@@ -48,7 +48,6 @@ from yuri.providers.registry import AgentRegistry, build_registry
 from yuri.services.approvals import ApprovalService
 from yuri.services.dispatch import WorkflowDispatcher
 from yuri.services.journal import Journal
-from yuri.services.memory import Memory
 from yuri.services.missions import MissionService
 from yuri.services.projects import ProjectService
 from yuri.services.roster import RosterService
@@ -77,7 +76,6 @@ class Container:
     registry: AgentRegistry
     router: AgentRouter
     journal: Journal
-    memory: Memory
     narration: NarrationService
     projects: ProjectService
     approvals: ApprovalService
@@ -171,7 +169,6 @@ def build_container(home: Home, registry: AgentRegistry, *, bridge: Bridge | Non
         bus = EventBus(repo=store.events, bridge=bridge)
         router = AgentRouter(registry, default_agent)
         journal = Journal(home)
-        memory = Memory(home)
         narration = NarrationService()
         projects = ProjectService(store, home, bus)
         approvals = ApprovalService(store, bus, journal)
@@ -227,7 +224,7 @@ def build_container(home: Home, registry: AgentRegistry, *, bridge: Bridge | Non
         # must never be published via set_container().
         store.close()
         raise
-    c = Container(home, store, bus, registry, router, journal, memory, narration, projects, approvals, missions,
+    c = Container(home, store, bus, registry, router, journal, narration, projects, approvals, missions,
                  sessions, roster, workflow, dispatcher, embedder,
                  EmbedWorker(store, embedder), Recollection(store, embedder),
                  templates, McpManager(home.path))
