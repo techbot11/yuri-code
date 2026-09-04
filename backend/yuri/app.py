@@ -35,6 +35,8 @@ from yuri.domain.ids import utcnow
 from yuri.events.bus import EventBus, bridge_to_event_log
 from yuri.home import Home, default_home
 from yuri.mcp.manager import McpManager
+from yuri.services.embed_worker import EmbedWorker
+from yuri.services.embedding import GeminiEmbedder
 from yuri.services.legacy_memory import import_legacy
 from yuri.narration.policy import MODES, Mode, normalize_mode
 from yuri.narration.service import NarrationService
@@ -84,6 +86,11 @@ class Container:
     # container because startup/shutdown own its bus subscription -- nothing
     # else should reach for it.
     dispatcher: WorkflowDispatcher
+    # Memory's two background pieces. The embedder is on the container so a
+    # test can substitute a fake without patching a module global, and the
+    # worker exists so `remember` never blocks on a 1.37s network call.
+    embedder: GeminiEmbedder
+    embed_worker: EmbedWorker
     # Configured MCP servers and the tools they currently provide. Built here
     # but CONNECTED in startup(), because connecting is async and best-effort:
     # a server that will not start must not stop the backend.
@@ -176,6 +183,7 @@ def build_container(home: Home, registry: AgentRegistry, *, bridge: Bridge | Non
         # only when a user actually released a workflow.
         workflow.dispatch = dispatcher.dispatch
         missions.sync_workflow = dispatcher.sync_workflow
+        embedder = GeminiEmbedder()
         try:
             roster.seed()
         except Exception:
@@ -203,7 +211,8 @@ def build_container(home: Home, registry: AgentRegistry, *, bridge: Bridge | Non
         store.close()
         raise
     c = Container(home, store, bus, registry, router, journal, memory, narration, projects, approvals, missions,
-                 sessions, roster, workflow, dispatcher, McpManager(home.path))
+                 sessions, roster, workflow, dispatcher, embedder,
+                 EmbedWorker(store, embedder), McpManager(home.path))
     set_container(c)
     return c
 
@@ -233,6 +242,9 @@ async def startup() -> Container:
     # dispatched/completed) and those events should be persisted, not dropped
     # into a queue nobody is reading yet.
     c.dispatcher.start()
+    # After the writer and the driver, before the import: the import writes
+    # rows the worker will then embed on its own.
+    c.embed_worker.start()
     try:
         # Once, ever, and the markdown files are never modified (spec §8). Not
         # a migration: migrate() runs SQL only and has no Home. A failure here
@@ -278,6 +290,10 @@ async def shutdown() -> None:
             await c.mcp.close()
         except Exception:
             log.exception("yuri: stopping MCP servers failed")
+        try:
+            await c.embed_worker.stop()
+        except Exception:
+            log.exception("yuri: stopping the embed worker failed")
         # Order matters, and it is the reverse of startup: providers stop FIRST,
         # because tearing one down can still publish (a cancelled turn, or
         # session.stopped when VC_KILL_SESSIONS_ON_SHUTDOWN=1). Only then is it
