@@ -39,6 +39,7 @@ from yuri.services.embed_worker import EmbedWorker
 from yuri.services.embedding import GeminiEmbedder
 from yuri.services.legacy_memory import import_legacy
 from yuri.services.recollection import Recollection
+from yuri.services.rollup import GeminiSummariser, roll_all
 from yuri.services.templates import TemplateStore
 from yuri.narration.policy import MODES, Mode, normalize_mode
 from yuri.narration.service import NarrationService
@@ -103,6 +104,10 @@ class Container:
     # but CONNECTED in startup(), because connecting is async and best-effort:
     # a server that will not start must not stop the backend.
     mcp: McpManager
+    # The background rollup, held so shutdown can cancel it rather than
+    # leaving a model call running past the process. Last, and defaulted:
+    # a defaulted dataclass field cannot precede a non-defaulted one.
+    rollup_task: asyncio.Task | None = None
 
 
 _container: Container | None = None
@@ -270,6 +275,16 @@ async def startup() -> Container:
                      moved["imported"], c.home.memory_dir, moved["skipped"])
     except Exception:
         log.exception("yuri: importing the existing markdown memory failed; will retry next start")
+    # Turning history into memories, in the background. A TASK rather than an
+    # await: summarising a day is a 1-3s model call per day, and startup must
+    # not wait on the network. roll_all never raises (spec §5.3).
+    async def _rollup() -> None:
+        out = await roll_all(c.store, c.home, GeminiSummariser())
+        if out["days"] or out["observations"]:
+            log.info("memory: rolled up %d day(s) and %d observation(s)",
+                     out["days"], out["observations"])
+
+    c.rollup_task = asyncio.create_task(_rollup())
     try:
         # Best effort, and never blocking: each server has its own bounded
         # connect timeout, and one that fails is logged and simply not
@@ -307,6 +322,11 @@ async def shutdown() -> None:
             await c.embed_worker.stop()
         except Exception:
             log.exception("yuri: stopping the embed worker failed")
+        if c.rollup_task is not None and not c.rollup_task.done():
+            # Cancelled rather than awaited: a day summary is a network call,
+            # and losing one costs nothing (the next start redoes it) while
+            # waiting for one delays shutdown by seconds.
+            c.rollup_task.cancel()
         # Order matters, and it is the reverse of startup: providers stop FIRST,
         # because tearing one down can still publish (a cancelled turn, or
         # session.stopped when VC_KILL_SESSIONS_ON_SHUTDOWN=1). Only then is it
