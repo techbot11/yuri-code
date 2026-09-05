@@ -7,7 +7,7 @@
   "author": "Yuri OS",
   "main": "./out/main/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json && mkdir -p out/boot && cp boot/index.html out/boot/ && mkdir -p out/assets && cp assets/*.png out/assets/",
+    "build": "tsc -p tsconfig.json && mkdir -p out/assets && cp assets/*.png out/assets/",
     "dev": "npm run build && electron .",
     "test": "node --test lib/*.test.ts",
     "clean": "rm -rf out"

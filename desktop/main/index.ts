@@ -26,8 +26,13 @@ import { createTray, setTrayState } from "./tray";
 const ports = portsFromEnv(process.env);
 const FRONTEND_URL = `http://localhost:${ports.frontend}`;
 
+// How long the window waits, hidden, for the frontend before showing
+// SOMETHING rather than nothing. Measured: `next start` answers in ~188ms,
+// so almost no boot ever reaches this -- it exists for the rare slow one
+// (a cold Next compile, a loaded machine), not the common case.
+const SPLASH_DELAY_MS = 3000;
+
 let mainWindow: BrowserWindow | null = null;
-let bootWindow: BrowserWindow | null = null;
 // Set by before-quit, and read by the window's close handler so a real quit
 // can actually destroy the window. NOTHING else writes it: a call site that
 // sets it first (boot:quit used to) makes before-quit's own re-entry guard
@@ -35,7 +40,9 @@ let bootWindow: BrowserWindow | null = null;
 // exits anyway via the default window-all-closed path.
 let quitting = false;
 // Guards the retry cycle end-to-end (stopServers()'s ~3.5s drain, then a
-// fresh boot()), not just one half of it. Both stopServers()'s module-level
+// fresh boot()) up to the point the window has something to show -- not the
+// backend's own health poll, which now continues in the background after
+// boot() returns (see boot()'s comment). Both stopServers()'s module-level
 // children/died state (servers.ts) and mainWindow are shared, unguarded
 // mutable state -- a second retry click while one cycle is in flight can
 // silently overwrite mainWindow with an orphaned second window, or SIGKILL
@@ -92,35 +99,84 @@ function createWindow(): BrowserWindow {
   return win;
 }
 
-function createBootWindow(): BrowserWindow {
-  const win = new BrowserWindow({
-    width: 520,
-    height: 420,
-    show: true,
-    resizable: false,
-    title: "Starting Yuri",
-    backgroundColor: "#1a1917",
-    webPreferences: { preload: path.join(__dirname, "../preload/index.js") },
-  });
-  // The default app menu is still active here (no Menu.setApplicationMenu),
-  // so ⌘W can close this window mid-boot. Track that so pushBoot() and the
-  // success path below stop reaching for a destroyed window instead of
-  // throwing inside boot()'s promise chain, where nothing would catch it.
-  win.on("closed", () => {
-    bootWindow = null;
-  });
-  void win.loadFile(path.join(__dirname, "../boot/index.html"));
-  return win;
+/** Escape text going into the minimal page's HTML (never into a live DOM via
+ *  textContent, since this page is built as a string -- see minimalPageUrl).
+ *  Untrusted in the sense that matters here: `detail` is a child process's
+ *  own stderr, which can contain literal `<`/`&` (a Python traceback's
+ *  `File "<string>"`, say) that would otherwise corrupt the page. */
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/** Push the current boot state to the boot window. `env`/`envDetail` cover
- *  the shell-probe row, which is not part of BootState (it finishes before
+/** The ONLY native UI left once the frontend owns its own boot screen: a
+ *  small, generic page for the two situations where there is no frontend to
+ *  show anything in yet -- a slow first paint (`failed: false`, no buttons,
+ *  matching the "Starting Yuri…" the frontend shows for the same wait) and
+ *  the frontend itself failing to start (`failed: true`, with whatever
+ *  stderr was captured, and Retry/Quit). Deliberately not a port of the old
+ *  boot/index.html: no per-service checklist, because the frontend is the
+ *  only thing this page ever waits on now. A `data:` URL rather than a file
+ *  on disk -- this is meant to be rare and small enough not to need one. */
+function minimalPageUrl(opts: { failed: boolean; detail: string }): string {
+  const html = `<!doctype html>
+<meta charset="utf-8" />
+<title>Yuri OS</title>
+<style>
+  :root {
+    --bg: #1a1917; --panel: #211f1d; --ink: #e9e3d8; --mut: #928c81;
+    --acc: #dd8a6a; --line: #322f2b;
+  }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px ui-sans-serif, system-ui, -apple-system, sans-serif;
+    display: grid; place-items: center; height: 100vh;
+  }
+  .card { width: 360px; text-align: center; }
+  p { color: var(--mut); margin: 0 0 14px; }
+  pre {
+    text-align: left; margin: 0 0 14px; padding: 10px 12px; max-height: 160px;
+    overflow: auto; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; font: 11.5px ui-monospace, Menlo, monospace;
+    color: var(--mut); white-space: pre-wrap;
+  }
+  .actions { display: flex; gap: 8px; justify-content: center; }
+  button {
+    font: inherit; font-size: 12.5px; color: var(--ink); background: none;
+    border: 1px solid var(--line); border-radius: 999px; padding: 5px 14px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--acc); color: var(--acc); }
+</style>
+<div class="card">
+  <p>${opts.failed ? "Yuri could not start" : "Starting Yuri…"}</p>
+  ${opts.failed && opts.detail ? `<pre>${escapeHtml(opts.detail)}</pre>` : ""}
+  ${opts.failed ? `<div class="actions">
+    <button id="retry">Try again</button>
+    <button id="quit">Quit</button>
+  </div>` : ""}
+</div>
+<script>
+  document.getElementById("retry")?.addEventListener("click", () => window.yuriBoot?.retry());
+  document.getElementById("quit")?.addEventListener("click", () => window.yuriBoot?.quit());
+</script>`;
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+}
+
+/** Push the current boot state to the frontend. `env`/`envDetail` cover the
+ *  shell-probe row, which is not part of BootState (it finishes before
  *  startServers begins and never fails outright, only falls back). A no-op
- *  once the window is gone (⌘W mid-boot, or the success path already closed
- *  it) rather than sending into -- or closing -- a destroyed window. */
+ *  once the window is gone (only possible while the app is quitting) rather
+ *  than sending into -- or closing -- a destroyed window.
+ *
+ *  Reaches whatever is currently loaded: the frontend's own SetupGate once
+ *  the app is showing (frontend is trivially "ready" by then -- it is what
+ *  rendered the page listening), or nothing at all before anything has
+ *  loaded (dropped; there is no listener yet, and the eventual load of the
+ *  minimal page bakes in the state already known at that point instead of
+ *  relying on a push landing before its listener exists). */
 function pushBoot(state: BootState, env: ChildState, envDetail = ""): void {
-  if (!bootWindow || bootWindow.isDestroyed()) return;
-  bootWindow.webContents.send("boot:state", {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("boot:state", {
     phase: env === "failed" ? "failed" : bootPhase(state),
     env,
     envDetail,
@@ -130,7 +186,17 @@ function pushBoot(state: BootState, env: ChildState, envDetail = ""): void {
   });
 }
 
+/** Wait for the FRONTEND only, then show it -- the backend wait is now the
+ *  frontend's own job, in its own theme (SetupGate + lib/backendWait.ts).
+ *  startServers() itself still checks both children in parallel and keeps
+ *  reporting backend progress via pushBoot for as long as it takes (up to
+ *  its own 60s ceiling), but this function does not block on that: it is
+ *  fire-and-forgotten below so a backend that is merely slow, rather than
+ *  dead, cannot hold `booting` (and so a retry click from inside the
+ *  frontend's own waiting view) hostage behind it. */
 async function boot(): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
   let state = initialBoot();
   pushBoot(state, "starting");
 
@@ -139,24 +205,59 @@ async function boot(): Promise<void> {
   const env = withFallbackPath(mergeEnv(process.env as Env, probed), homeDir());
   // Names only, never values: this string reaches a window, and the
   // environment carries ANTHROPIC_AUTH_TOKEN and friends.
-  pushBoot(state, "ready", probed ? "from your shell" : "using known locations");
+  const envDetail = probed ? "from your shell" : "using known locations";
+  pushBoot(state, "ready", envDetail);
 
-  await startServers(
+  let frontendDetail = "";
+  let settleFrontend: () => void = () => {};
+  const frontendSettled = new Promise<void>((resolve) => { settleFrontend = resolve; });
+
+  // Not awaited: see this function's own comment above. Errors from
+  // startServers() itself (as opposed to a child failing, which arrives as
+  // an ordinary BootEvent) are not expected, but must not vanish silently.
+  void startServers(
     env,
     (ev) => {
       state = applyBootEvent(state, ev);
-      pushBoot(state, "ready", probed ? "from your shell" : "using known locations");
+      pushBoot(state, "ready", envDetail);
+      if (ev.type === "failed" && ev.child === "frontend") frontendDetail = ev.detail;
+      if (ev.child === "frontend") settleFrontend();
     },
     ports,
-  );
+  ).catch((err) => {
+    console.error("[yuri] startServers() rejected:", err instanceof Error ? err.message : err);
+    // Not an ordinary BootEvent (something in startServers() itself threw,
+    // rather than a child failing cleanly) -- but frontendSettled must still
+    // resolve, or a bug here would hang boot() forever with the window
+    // showing nothing. Frontend, not backend: nothing can show without it,
+    // regardless of which child startServers() was working on when it threw.
+    if (state.frontend === "starting") {
+      state = applyBootEvent(state, {
+        type: "failed", child: "frontend", detail: "the desktop shell failed to start it",
+      });
+      frontendDetail ||= "the desktop shell failed to start it";
+      settleFrontend();
+    }
+  });
 
-  if (bootPhase(state) !== "ready") return; // the boot window shows why
+  const splashTimer = setTimeout(() => {
+    if (state.frontend === "starting" && mainWindow && !mainWindow.isDestroyed()) {
+      void mainWindow.loadURL(minimalPageUrl({ failed: false, detail: "" }))
+        .then(() => mainWindow?.show());
+    }
+  }, SPLASH_DELAY_MS);
 
-  mainWindow = createWindow();
-  await mainWindow.loadURL(FRONTEND_URL);
+  await frontendSettled;
+  clearTimeout(splashTimer);
+
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  if (state.frontend === "ready") {
+    await mainWindow.loadURL(FRONTEND_URL);
+  } else {
+    await mainWindow.loadURL(minimalPageUrl({ failed: true, detail: frontendDetail }));
+  }
   mainWindow.show();
-  if (bootWindow && !bootWindow.isDestroyed()) bootWindow.close();
-  bootWindow = null;
 }
 
 /** The whole retry cycle: drain the old children, then boot from scratch.
@@ -182,16 +283,15 @@ export function showMainWindow(): void {
 }
 
 app.whenReady().then(async () => {
-  // Before the boot window, not after: her presence in the menu bar should
-  // not wait on a successful boot, and a failed boot still leaves a tray
-  // behind to show something is wrong.
+  // Before the window, not after: her presence in the menu bar should not
+  // wait on a successful boot, and a failed boot still leaves a tray behind
+  // to show something is wrong.
   createTray(showMainWindow);
 
-  bootWindow = createBootWindow();
-  // Wait for the page before pushing state, or the first push lands nowhere.
-  await new Promise<void>((resolve) =>
-    bootWindow!.webContents.once("did-finish-load", () => resolve()),
-  );
+  // The ONLY BrowserWindow this app ever creates. Hidden until boot() (or
+  // the retry cycle it starts over) decides there is something to show.
+  mainWindow = createWindow();
+
   // An unhandled rejection here is a boot that stops silently -- the one
   // thing this window exists to prevent -- so it is logged rather than left
   // to vanish into whatever process.on("unhandledRejection") does by default.
@@ -248,11 +348,12 @@ app.on("activate", () => showMainWindow());
 
 // Deliberately empty. Two reasons:
 //   - Without this, Electron's default is to quit once no windows remain.
-//     ⌘W on the BOOT window while startServers() is still running would fire
-//     that default and drain via before-quit before the children exist,
-//     while boot()'s in-flight startServers() goes on to spawn them anyway --
-//     orphaning both, holding their ports, with nothing left to stop them.
+//     ⌘W on the (now hidden-by-default) main window while startServers() is
+//     still running would fire that default and drain via before-quit before
+//     the children exist, while boot()'s in-flight startServers() goes on to
+//     spawn them anyway -- orphaning both, holding their ports, with nothing
+//     left to stop them.
 //   - Now that a tray exists, the app's whole point is to survive having no
-//     windows at all (hide-on-close plus closing the boot window is exactly
-//     that state) -- which is also the standard macOS convention.
+//     windows at all (hide-on-close is exactly that state) -- which is also
+//     the standard macOS convention.
 app.on("window-all-closed", () => {});
