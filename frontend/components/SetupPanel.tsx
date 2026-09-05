@@ -36,12 +36,18 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
       setKeys(c.keys || []);
       setWhere(c.path || "");
       setLoadError(null);
+      // Whoever is showing this panel may be gating the app on it. Nothing
+      // blocking means there is nothing left to gate on -- and the fix may
+      // have happened elsewhere (the Rail's own Setup link mounts a second
+      // panel), so waiting for a save here would strand the user on a screen
+      // showing an all-green checklist.
+      if (blocking(fresh).length === 0) onPass?.();
       return fresh;
     } catch (e) {
       setLoadError(e);
       return null;
     }
-  }, []);
+  }, [onPass]);
 
   useEffect(() => {
     void load();
@@ -67,9 +73,9 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
         return rest;
       });
       // Re-read rather than trusting the save: a key can be written and still
-      // leave something else blocking. load() IS that re-read.
-      const fresh = await load();
-      if (fresh && blocking(fresh).length === 0) onPass?.();
+      // leave something else blocking. load() IS that re-read, and load()
+      // itself now fires onPass when nothing is left blocking.
+      await load();
     } catch (e) {
       setSaveError(e instanceof ApiError ? e.message : String(e));
     } finally {
