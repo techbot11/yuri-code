@@ -58,10 +58,13 @@ try:  # dotenv is present in the venv; stay importable without it (e.g. in tests
             os.environ[_k] = _v
             ENV_SOURCES[_k] = label
 
-    # backend/.env wins (override=True); the config dir only fills gaps and is
-    # present only on Homebrew.
-    _load_env_file(_BACKEND_ENV, override=True, label="backend/.env")
+    # Precedence: the real process environment wins, then the out-of-tree
+    # config dir, then backend/.env. The real environment is FIRST because
+    # the desktop app injects credentials that way (spec §6.3) -- a leftover
+    # backend/.env would otherwise silently beat them (same failure shape as
+    # a --model flag pinned over the user's own config).
     _load_env_file(_CONFIG_ENV, override=False, label=_CONFIG_ENV_DISPLAY or "")
+    _load_env_file(_BACKEND_ENV, override=False, label="backend/.env")
 except Exception:
     pass
 
