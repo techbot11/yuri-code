@@ -281,74 +281,91 @@ Create `backend/tests/test_config_precedence.py`:
 desktop app injects credentials that way (spec §6.3) and a leftover
 development backend/.env would otherwise silently beat them.
 
+Tests the loader directly rather than through `importlib.reload`: `_BACKEND_ENV`
+is computed from `__file__` at import, so a patched value does not survive a
+reload and such a test would pass whether or not the fix is present.
+
     cd backend && .venv/bin/python -m unittest tests.test_config_precedence
 """
 from __future__ import annotations
 
-import importlib
 import os
 import sys
 import tempfile
 import unittest
-from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import config  # noqa: E402
 
-class EnvPrecedence(unittest.TestCase):
-    """Each test reloads config with a planted backend/.env and config dir, so
-    the assertions are about the loader rather than about the developer's own
-    environment."""
+PROBE = "PRECEDENCE_PROBE"
 
-    def _load(self, *, backend_env: dict | None, config_env: dict | None,
-              real: dict) -> object:
-        stack = tempfile.TemporaryDirectory()
-        self.addCleanup(stack.cleanup)
-        d = stack.name
-        cfg_dir = os.path.join(d, "cfg")
-        os.makedirs(cfg_dir)
-        backend_path = os.path.join(d, ".env")
 
-        def write(path: str, values: dict) -> None:
-            with open(path, "w") as f:
-                for k, v in values.items():
-                    f.write(f"{k}={v}\n")
+class _Harness(unittest.TestCase):
+    """Setup only, NO tests. Subclassing a class that carries its own tests
+    makes unittest re-run every one of them under the subclass's name."""
 
-        if backend_env is not None:
-            write(backend_path, backend_env)
-        if config_env is not None:
-            write(os.path.join(cfg_dir, ".env"), config_env)
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(lambda: os.environ.pop(PROBE, None))
+        os.environ.pop(PROBE, None)
 
-        env = {**real, "YAPCODE_CONFIG_DIR": cfg_dir}
-        with mock.patch.dict(os.environ, env, clear=False):
-            for k in ("PRECEDENCE_PROBE",):
-                if k not in env:
-                    os.environ.pop(k, None)
-            import config as cfg
-            with mock.patch.object(cfg, "_BACKEND_ENV", backend_path):
-                importlib.reload(cfg)
-                return cfg
+    def plant(self, name: str, value: str) -> str:
+        """Write a one-key .env and return its path."""
+        path = os.path.join(self.tmp.name, name)
+        with open(path, "w") as f:
+            f.write(f"{PROBE}={value}\n")
+        return path
 
-    def test_real_environment_beats_both_files(self):
-        cfg = self._load(backend_env={"PRECEDENCE_PROBE": "from-backend-env"},
-                         config_env={"PRECEDENCE_PROBE": "from-config-dir"},
-                         real={"PRECEDENCE_PROBE": "from-real-env"})
-        self.assertEqual(os.environ["PRECEDENCE_PROBE"], "from-real-env")
-        self.assertEqual(cfg._source_of("PRECEDENCE_PROBE"), "process environment")
+    def load_in_config_order(self, config_env: str | None, backend_env: str | None) -> None:
+        """The exact sequence config.py performs, in the same order."""
+        if config_env:
+            config._load_env_file(config_env, override=False, label="config dir")
+        if backend_env:
+            config._load_env_file(backend_env, override=False, label="backend/.env")
 
-    def test_config_dir_beats_backend_env(self):
-        cfg = self._load(backend_env={"PRECEDENCE_PROBE": "from-backend-env"},
-                         config_env={"PRECEDENCE_PROBE": "from-config-dir"},
-                         real={})
-        self.assertEqual(os.environ["PRECEDENCE_PROBE"], "from-config-dir")
 
-    def test_backend_env_still_applies_when_nothing_else_does(self):
-        self._load(backend_env={"PRECEDENCE_PROBE": "from-backend-env"},
-                   config_env=None, real={})
-        self.assertEqual(os.environ["PRECEDENCE_PROBE"], "from-backend-env")
+class Precedence(_Harness):
+    def test_the_real_environment_is_not_clobbered_by_either_file(self):
+        # The regression this whole task exists for: backend/.env used to load
+        # with override=True, which overwrote a value the parent process set.
+        os.environ[PROBE] = "from-real-env"
+        self.load_in_config_order(self.plant("cfg.env", "from-config-dir"),
+                                  self.plant("backend.env", "from-backend-env"))
+        self.assertEqual(os.environ[PROBE], "from-real-env")
 
-    def tearDown(self):
-        os.environ.pop("PRECEDENCE_PROBE", None)
+    def test_the_config_dir_beats_backend_env(self):
+        self.load_in_config_order(self.plant("cfg.env", "from-config-dir"),
+                                  self.plant("backend.env", "from-backend-env"))
+        self.assertEqual(os.environ[PROBE], "from-config-dir")
+
+    def test_backend_env_applies_when_nothing_else_does(self):
+        self.load_in_config_order(None, self.plant("backend.env", "from-backend-env"))
+        self.assertEqual(os.environ[PROBE], "from-backend-env")
+
+    def test_provenance_is_recorded_for_whichever_file_won(self):
+        self.load_in_config_order(self.plant("cfg.env", "from-config-dir"),
+                                  self.plant("backend.env", "from-backend-env"))
+        self.assertEqual(config.ENV_SOURCES.get(PROBE), "config dir")
+
+
+class CallSites(_Harness):
+    """The loader having the right semantics is not enough — config.py's own
+    two calls must use them. This pins the observable outcome at import order,
+    which is what a future reordering would break."""
+
+    def test_neither_call_site_overrides(self):
+        import inspect
+        src = inspect.getsource(config)
+        head = src[:src.index("VOICE_KEY_VARS")]
+        self.assertNotIn("override=True", head,
+                         "a .env file must never override the real environment")
+        self.assertEqual(head.count("_load_env_file(_CONFIG_ENV, override=False"), 1)
+        self.assertEqual(head.count("_load_env_file(_BACKEND_ENV, override=False"), 1)
+        # And the config dir is consulted FIRST, so it wins over backend/.env.
+        self.assertLess(head.index("_load_env_file(_CONFIG_ENV"),
+                        head.index("_load_env_file(_BACKEND_ENV"))
 ```
 
 - [ ] **Step 2: Run it to confirm the first case fails**
@@ -357,7 +374,11 @@ class EnvPrecedence(unittest.TestCase):
 cd backend && .venv/bin/python -m unittest tests.test_config_precedence -v 2>&1 | tail -15
 ```
 
-Expected: `test_real_environment_beats_both_files` FAILS with `'from-backend-env' != 'from-real-env'`.
+Expected: `CallSites.test_neither_call_site_overrides` FAILS on `override=True`, and
+`test_the_config_dir_beats_backend_env` FAILS because the config dir is currently
+consulted second. The `Precedence` tests that exercise `_load_env_file` with
+`override=False` directly already pass — they document the semantics the call sites
+must use.
 
 - [ ] **Step 3: Fix the precedence**
 
@@ -438,11 +459,16 @@ class Masking(unittest.TestCase):
         self.assertEqual(config.masked_hint(SECRET), "…4f2a")
 
     def test_a_short_secret_is_masked_entirely(self):
-        # Showing "…abc" of a four-character secret reveals most of it.
-        for short in ("", "a", "abcd", "abcdefg"):
-            self.assertNotIn(short[-4:] if len(short) > 7 else "\x00",
-                             config.masked_hint(short))
-            self.assertEqual(config.masked_hint(short), "set")
+        # Showing "…abcd" of an eight-character secret reveals half of it, so
+        # anything at or below the threshold gets no hint at all.
+        for short in ("a", "abcd", "abcdefg", "12345678"):
+            self.assertEqual(config.masked_hint(short), "set", short)
+
+    def test_an_empty_value_has_no_hint_at_all(self):
+        # Nothing is set, so there is nothing to hint at — and "set" would be
+        # a claim that something is.
+        self.assertEqual(config.masked_hint(""), "")
+        self.assertEqual(config.masked_hint("   "), "")
 
     def test_a_non_secret_is_shown_in_full(self):
         # ANTHROPIC_BASE_URL and ANTHROPIC_MODEL are configuration, not
@@ -676,14 +702,36 @@ SECRET = "sk-proj-do-not-leak-me-9f31"
 
 class _Harness(unittest.TestCase):
     """Setup only, NO tests. Subclassing a class that carries its own tests
-    makes unittest re-run every one of them under the subclass's name."""
+    makes unittest re-run every one of them under the subclass's name.
+
+    Builds its own app rather than importing `main.app`, matching every other
+    API test here (see tests/test_phase7_api.py:29-55). Importing the real app
+    would boot the real container against the developer's own YURI_HOME."""
 
     def setUp(self):
+        from fastapi import FastAPI
         from fastapi.testclient import TestClient
-        from main import app
-        self.client = TestClient(app)
+        from yuri import app as yapp
+        from yuri.api.routes import build_router
+        from yuri.providers.fake import FakeAgentProvider
+
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        home = os.path.join(self.tmp.name, "Yuri")
+        self.patches = [
+            mock.patch.dict(os.environ, {"ALLOWED_PROJECT_ROOTS": self.tmp.name}),
+            mock.patch.object(config, "YURI_HOME", home),
+        ]
+        [p.start() for p in self.patches]
+        self.addCleanup(lambda: [p.stop() for p in self.patches])
+        self.c = yapp.test_container(home, FakeAgentProvider())
+
+        async def guard():
+            return None
+        app = FastAPI()
+        app.include_router(build_router(guard))
+        self.client = TestClient(app)
+        self.addCleanup(self.client.close)
 
 
 class DoctorEndpoint(_Harness):
@@ -770,6 +818,9 @@ class ConfigWrite(_Harness):
 
 
 class StoreDirectly(unittest.TestCase):
+    """Deliberately NOT a _Harness subclass: these touch the store alone and
+    need no app, no container and no home."""
+
     def test_write_creates_the_file_at_0600_even_on_a_fresh_dir(self):
         with tempfile.TemporaryDirectory() as d:
             target = os.path.join(d, "nested")
