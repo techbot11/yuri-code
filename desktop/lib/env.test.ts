@@ -66,6 +66,39 @@ test("a chunk with no assignment at all is dropped", () => {
   assert.deepEqual(parseEnvOutput("=novalue\0"), {}, "an empty name is not a name");
 });
 
+test("a chunk of only '=' characters has no assignment", () => {
+  assert.deepEqual(parseEnvOutput("===\0"), {});
+});
+
+test("leading bare newlines with no banner text still find the assignment", () => {
+  const got = parseEnvOutput("\n\n\nPATH=/usr/bin\0");
+  assert.equal(got.PATH, "/usr/bin");
+});
+
+test("a name starting with a digit is not a name", () => {
+  const got = parseEnvOutput("9INVALID=x\0GOOD=1\0");
+  assert.deepEqual(got, { GOOD: "1" });
+});
+
+test("a long run of '=' before the assignment is parsed in linear time", () => {
+  // The previous scan re-sliced a growing prefix per rejected '=': 400k of
+  // them took 38 seconds, synchronously, in the main process. This is not a
+  // micro-benchmark dressed as a test -- it is the "never hangs" guarantee,
+  // and the probe's timeout cannot bound work that happens after the child
+  // has already exited.
+  const noisy = "=".repeat(1_000_000) + "\nPATH=/usr/bin";
+  const t0 = Date.now();
+  const got = parseEnvOutput(noisy + "\0");
+  const ms = Date.now() - t0;
+  assert.equal(got.PATH, "/usr/bin");
+  assert.ok(ms < 1000, `took ${ms}ms — the scan is not linear`);
+});
+
+test("a very long value survives intact", () => {
+  const value = "a".repeat(500_000);
+  assert.equal(parseEnvOutput(`TOKEN=${value}\0`).TOKEN, value);
+});
+
 test("the fallback PATH covers where the tools actually live", () => {
   // These are the install locations that matter on macOS. Homebrew on Apple
   // Silicon is /opt/homebrew; Intel and older installs are /usr/local.

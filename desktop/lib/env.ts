@@ -26,24 +26,20 @@ export const FALLBACK_PATH_DIRS: string[] = [
  *  into a garbage key. */
 export function parseEnvOutput(text: string): Env {
   const out: Env = {};
-  const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
   for (const entry of text.split("\0")) {
     if (!entry) continue;
-    // Find the first '=' that is actually an assignment's, by testing the
-    // name it would imply. Two things make the naive scans wrong:
+    // ONE pass, no slicing until a match. Track whether the current line is
+    // still a valid variable-name prefix; the first '=' that arrives while it
+    // is becomes the assignment.
     //
-    //   - A shell banner arrives glued to the FIRST chunk (it has no NUL
-    //     after it), and a banner containing '=' -- a "====" divider, which
-    //     real MOTDs are full of -- makes indexOf("=") point into the noise.
-    //   - A VALUE may contain a newline (the reason the delimiter is NUL),
-    //     and its later lines may themselves look like "NAME=value". Anchoring
-    //     on the LAST newline therefore mistakes a continuation line for the
-    //     assignment and loses the real variable.
-    //
-    // Testing the candidate name settles both: the banner's '=' implies a
-    // name like "====" and is skipped, while a real "A=x\nB=y" is taken as A
-    // with the value "x\nB=y" -- which is what the format means, since NUL is
-    // the only record separator.
+    // Two things this has to get right at once, and four earlier attempts got
+    // one at the expense of the other:
+    //   - A shell banner arrives glued to the FIRST chunk (no NUL follows it),
+    //     and a banner containing '=' -- a "====" divider, which real MOTDs
+    //     are full of -- must not be mistaken for the assignment.
+    //   - A VALUE may contain a newline (the whole reason the delimiter is
+    //     NUL), and its later lines may themselves look like "NAME=value";
+    //     those belong to the value, since NUL is the only record separator.
     //
     // One case is genuinely ambiguous and left as-is on purpose: a banner
     // whose LAST line happens to look like an assignment (e.g. "Setting
@@ -52,22 +48,39 @@ export function parseEnvOutput(text: string): Env {
     // because failing closed would lose a real variable that has the same
     // shape.
     //
-    // The scan condition is `i !== -1`, not `i > 0`: a divider that starts
-    // AT index 0 (e.g. a "====" banner beginning the chunk) is a real '='
-    // position that must still be tested and rejected, not treated as "none
-    // found". Traced against the "====" divider test below: with `i > 0` the
-    // loop exits on the very first character instead of scanning past it,
-    // and the real PATH= further in the chunk is never reached.
+    // It is also O(n). A prior version re-sliced a growing prefix per
+    // rejected '=', which took 38 SECONDS on 400k '=' characters -- running
+    // synchronously in the main process after the child had exited, so the
+    // probe's timeout did not bound it and the UI froze. That is precisely
+    // the "never hangs" guarantee this subsystem exists to provide, and a
+    // banner saturated with '=' (base64 padding from an iTerm2 inline image,
+    // ASCII-art dividers, a prompt theme dumping a blob) is well within what
+    // the 4MB maxBuffer ceiling allows through.
+    let nameStart = 0;
+    let valid = false;
     let name = "";
     let value = "";
-    for (let i = entry.indexOf("="); i !== -1; i = entry.indexOf("=", i + 1)) {
-      const before = entry.slice(0, i);
-      const candidate = before.slice(before.lastIndexOf("\n") + 1);
-      if (NAME.test(candidate)) {
-        name = candidate;
-        value = entry.slice(i + 1);
-        break;
+    for (let i = 0; i < entry.length; i++) {
+      const c = entry.charCodeAt(i);
+      if (c === 10) {            // \n -- a new line, so a new name may start
+        nameStart = i + 1;
+        valid = false;
+        continue;
       }
+      if (c === 61) {            // =
+        if (valid && i > nameStart) {
+          name = entry.slice(nameStart, i);
+          value = entry.slice(i + 1);
+        }
+        if (name) break;
+        continue;
+      }
+      const alpha = (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
+      const digit = c >= 48 && c <= 57;
+      // First character of the line must start a name; later ones may extend
+      // it. Once broken, it stays broken until the next newline.
+      if (i === nameStart) valid = alpha;
+      else if (valid) valid = alpha || digit;
     }
     if (name) out[name] = value;
   }
