@@ -20,6 +20,8 @@ import {
 import { authHeaders } from "./auth";
 import { enqueueInjection, type PendingInjection } from "./narration";
 
+import { getMicStream, micErrorMessage } from "./mic";
+
 const CALLS_URL = "https://api.openai.com/v1/realtime/calls";
 
 export class RealtimeSession implements VoiceSession {
@@ -134,9 +136,16 @@ export class RealtimeSession implements VoiceSession {
     // Explicit DSP constraints: echo of the assistant's own voice re-entering
     // the mic reads as user speech to server VAD, which cancels the response
     // mid-sentence (observed as 4x output_audio_buffer.cleared in one session).
-    this.localStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    });
+    // Bounded, and with a message the user can act on: getUserMedia does not
+    // reject while a prompt sits unanswered or the device is held by another
+    // tab, so an unbounded call leaves the connect hanging with nothing shown.
+    try {
+      this.localStream = await getMicStream({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } catch (e) {
+      throw new Error(micErrorMessage(e));
+    }
     this.opts.onLocalStream?.(this.localStream); // feed the user's mic to the orb analyser
     for (const track of this.localStream.getTracks()) pc.addTrack(track, this.localStream);
 

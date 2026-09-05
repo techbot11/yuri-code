@@ -5,6 +5,7 @@
 // the transparent band between them never eats a click meant for the orb.
 import { useEffect, useState } from "react";
 import { useYuri } from "@/components/VoiceProvider";
+import { failure } from "@/lib/voiceStatus";
 import { orbCaption } from "@/lib/voiceui.ts";
 import { NARRATION_MODES } from "@/lib/narration.ts";
 
@@ -24,7 +25,7 @@ function Clock() {
 export function TopBar() {
   const {
     connected, muted, vstate, connect, disconnect, toggleMute,
-    narrationMode, setNarrationMode, narrationBusy,
+    narrationMode, setNarrationMode, narrationBusy, status,
   } = useYuri();
 
   const caption = orbCaption(connected, muted, vstate);
@@ -46,6 +47,13 @@ export function TopBar() {
           <span className="dot" aria-hidden="true" />
           <span>{connected ? caption : "Connect voice"}</span>
         </button>
+        {/* A failed connect used to be invisible: the provider computed
+            "Failed: ..." into state that no component rendered, so the user
+            saw neither "connected" nor a reason. Shown beside the pill, which
+            is where they just clicked. */}
+        {!connected && failure(status) && (
+          <span className="vfail" role="status">{failure(status)}</span>
+        )}
         {connected && (
           <button
             className="vmute"

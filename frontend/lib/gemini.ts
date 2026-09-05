@@ -26,6 +26,7 @@ import {
   recomputeCost,
 } from "./voice";
 import { authHeaders } from "./auth";
+import { getMicStream, micErrorMessage } from "./mic";
 import {
   forceDrain, hasPending, newSpeechQueue, noteInterrupted, noteTurnComplete,
   noteTurnStart, reset, submit,
@@ -326,7 +327,13 @@ export class GeminiSession implements VoiceSession {
 
   // --- audio setup --------------------------------------------------------
   private async initAudio() {
-    this.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Same bound and the same plain message as the OpenAI transport: an
+    // unbounded getUserMedia hangs the connect with nothing shown.
+    try {
+      this.micStream = await getMicStream({ audio: true });
+    } catch (e) {
+      throw new Error(micErrorMessage(e));
+    }
     this.opts.onLocalStream?.(this.micStream); // feed the user's mic to the orb analyser
 
     this.inCtx = new AudioContext({ sampleRate: INPUT_RATE });
