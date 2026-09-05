@@ -2806,6 +2806,14 @@ details.handoff:hover>summary {
       overflow: visible;
    }
 
+   /* .shell is height: auto here, so the page itself does the scrolling —
+      a 100vh cap on the gate would clip the form instead. */
+   .setup-gate {
+      max-height: none;
+      overflow-y: visible;
+      padding: 14px;
+   }
+
    .orb-canvas,
    .naming,
    .hint,
@@ -4600,6 +4608,24 @@ a.miss-row {
 
 /* --- Setup: the checks, and the keys ------------------------------------- */
 .setup, .setup-view { min-width: 0; }
+
+/* The gate stands in for the whole stage while something required is missing
+   (app/layout.tsx), so it is a grid child of .shell rather than content inside
+   .vpanel — and it therefore has to bring the padding and the scrolling the
+   panel used to give it. max-height, not height: the row is auto-sized, and a
+   definite bound is what makes overflow-y actually scroll instead of pushing
+   the whole shell past the viewport. Capped in width so the form doesn't
+   stretch to a 34" monitor. */
+.setup-gate {
+   min-width: 0;
+   max-height: 100vh;
+   overflow-y: auto;
+   padding: 26px;
+}
+
+.setup-gate>.setup-view {
+   max-width: 680px;
+}
 
 .setup-checks {
    display: flex;

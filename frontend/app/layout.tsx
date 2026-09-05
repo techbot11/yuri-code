@@ -29,22 +29,33 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   // backwards and Yuri drops mid-sentence, and jumps back to centre, on every
   // click.
   //
-  // SetupGate wraps only the routed {children}, inside VoiceProvider (it
-  // calls yget, and the provider owns auth) but inside Stage too — Stage owns
-  // the orb, TopBar, Home and Dock, none of which should vanish just because
-  // something required is missing. Stage derives "engaged" from the pathname
-  // itself, not from what's inside its panel, so gating the panel's content
-  // doesn't disturb that. Rail and the dock stay reachable, and since the
-  // gate never shuts on the /setup route, /setup stays reachable too.
+  // SetupGate wraps the WHOLE STAGE, not just the routed {children} — inside
+  // VoiceProvider (it calls yget, and the provider owns auth), outside Stage.
+  //
+  // It used to sit inside Stage, around {children} alone, and that made it
+  // invisible on the one route where it matters. Stage renders {children}
+  // inside `.vpanel`, whose data-open comes from `pathname !== "/"` — so on
+  // "/" (the landing route, where a first run begins) the panel is
+  // opacity: 0, pointer-events: none and aria-hidden on desktop, and
+  // display: none on mobile. The gate substituted a Setup screen into an
+  // invisible, non-interactive box: the user saw the orb and the dock and was
+  // never told anything was wrong. Spec §6.2 requires the doctor screen
+  // INSTEAD of the main UI, which is what standing in for the stage does.
+  //
+  // Out here it also takes the dock with it: the talk affordance and the
+  // composer live inside Stage, so while the gate is shut there is no control
+  // on screen that cannot work (docs/yuri/design/GUIDE.md §6). Rail stays
+  // outside the gate and therefore reachable, and since the gate never shuts
+  // on /setup, that route stays reachable too.
   return (
     <html lang="en" suppressHydrationWarning className={`${display.variable} ${body.variable}`}>
       <body suppressHydrationWarning>
         <VoiceProvider>
           <div className="shell">
             <Rail />
-            <Stage>
-              <SetupGate>{children}</SetupGate>
-            </Stage>
+            <SetupGate>
+              <Stage>{children}</Stage>
+            </SetupGate>
           </div>
         </VoiceProvider>
       </body>

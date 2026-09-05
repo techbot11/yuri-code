@@ -11,6 +11,12 @@
 // It stays SHUT while the answer is unknown: opening on unknown state would
 // render the whole app and then snatch it away. `/setup` itself is never
 // gated, or a failing check would make the fix unreachable.
+//
+// This component STANDS IN FOR THE STAGE (see app/layout.tsx) rather than
+// filling the stage's panel, so everything it renders — the waiting state
+// included — has to carry the stage's own padding and scrolling. That is what
+// `.setup-gate` is for. Rendering into `.vpanel` instead is what made the
+// gate invisible on "/".
 import { useCallback, useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { yget } from "@/lib/api";
@@ -44,13 +50,26 @@ export function SetupGate({ children }: { children: React.ReactNode }) {
 
   if (!reachable || dismissed) return <>{children}</>;
   if (pathname === "/setup") return <>{children}</>;
-  if (checks === null) return <div className="empty">Checking your machine…</div>;
+  if (checks === null) {
+    return (
+      <div className="setup-gate">
+        <div className="setup-view">
+          <h2 className="viewtitle">Checking your machine</h2>
+          <div className="empty">
+            Running the same checks as <code>yuri doctor</code>…
+          </div>
+        </div>
+      </div>
+    );
+  }
   if (gateOpen(checks)) return <>{children}</>;
 
   return (
-    <div className="setup-view">
-      <h2 className="viewtitle">Before Yuri can start</h2>
-      <SetupPanel onPass={handlePass} />
+    <div className="setup-gate">
+      <div className="setup-view">
+        <h2 className="viewtitle">Before Yuri can start</h2>
+        <SetupPanel onPass={handlePass} />
+      </div>
     </div>
   );
 }
