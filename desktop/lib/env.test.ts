@@ -62,6 +62,16 @@ test("a value containing a newline still round-trips", () => {
   assert.equal(got.MULTI, "first\nsecond");
 });
 
+test("a banner containing '=' still does not swallow the first variable", () => {
+  // A "====" divider is the common MOTD shape, and it puts an '=' before the
+  // real assignment's.
+  const got = parseEnvOutput(
+    "========================\nWelcome\nPATH=/opt/homebrew/bin\0ANTHROPIC_MODEL=m\0");
+  assert.equal(got.PATH, "/opt/homebrew/bin");
+  assert.equal(got.ANTHROPIC_MODEL, "m");
+  assert.equal(Object.keys(got).length, 2);
+});
+
 test("the fallback PATH covers where the tools actually live", () => {
   // These are the install locations that matter on macOS. Homebrew on Apple
   // Silicon is /opt/homebrew; Intel and older installs are /usr/local.
@@ -87,4 +97,12 @@ test("the fallback PATH does not duplicate what is already there", () => {
 test("a missing PATH still gets the fallback", () => {
   const got = withFallbackPath({}, "/Users/x");
   assert.ok(got.PATH.includes("/opt/homebrew/bin"));
+});
+
+test("a trailing slash on an inherited entry still dedupes", () => {
+  // "/opt/homebrew/bin/" and "/opt/homebrew/bin" are the same directory;
+  // comparing literal strings would append a redundant second entry.
+  const got = withFallbackPath({ PATH: "/opt/homebrew/bin/" }, "/Users/x");
+  const count = got.PATH.split(":").filter((d) => d.replace(/\/+$/, "") === "/opt/homebrew/bin").length;
+  assert.equal(count, 1);
 });

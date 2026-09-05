@@ -28,21 +28,33 @@ export function parseEnvOutput(text: string): Env {
   const out: Env = {};
   for (const entry of text.split("\0")) {
     if (!entry) continue;
-    const eq = entry.indexOf("=");
+    // Strip shell noise BEFORE looking for '=', not after. A banner arrives
+    // glued to the first assignment (it has no NUL after it), and a banner
+    // containing an '=' -- a "====" divider, which real MOTDs are full of --
+    // would put that '=' before the true one if we searched the whole chunk,
+    // discarding the real assignment entirely.
+    //
+    // Only take the after-last-newline slice when it actually looks like an
+    // assignment (`NAME=...`); otherwise fall back to the whole chunk. That
+    // fallback is what keeps a multi-line VALUE working -- env -0's whole
+    // reason for existing -- because then the last newline sits inside the
+    // value, the text after it doesn't look like an assignment, and we use
+    // the full chunk instead of truncating the value at that newline.
+    const nl = entry.lastIndexOf("\n");
+    let assignment = entry;
+    if (nl !== -1) {
+      const candidate = entry.slice(nl + 1);
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(candidate)) assignment = candidate;
+    }
+    const eq = assignment.indexOf("=");
     // A chunk with no '=' is not an assignment. Skipping it beats inventing
     // a key with an empty name.
     if (eq <= 0) continue;
-    // A shell that prints anything before `env -0` -- a motd, an nvm notice,
-    // whatever a .zshrc echoes -- has no NUL after its banner, so the banner
-    // arrives glued to the FIRST assignment. Taking the name from after the
-    // last newline recovers that variable instead of filing it under a key
-    // made of the banner. Measured: without this, PATH was lost and every
-    // later variable survived.
-    const name = entry.slice(0, eq).split("\n").pop() || "";
-    // And it must actually be a variable name, so genuine junk is still
-    // dropped rather than becoming a key with a plausible-looking value.
+    const name = assignment.slice(0, eq);
+    // It must actually be a variable name, so genuine junk is still dropped
+    // rather than becoming a key with a plausible-looking value.
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
-    out[name] = entry.slice(eq + 1);
+    out[name] = assignment.slice(eq + 1);
   }
   return out;
 }
@@ -67,13 +79,17 @@ export function mergeEnv(base: Env, probed: Env | null): Env {
  *  priority, and this only adds places to look. Duplicates are dropped so a
  *  repeated directory does not make PATH grow on every launch. */
 export function withFallbackPath(env: Env, home: string): Env {
+  // Normalised for comparison only -- entries we keep stay verbatim. Without
+  // this, an inherited "/opt/homebrew/bin/" (trailing slash) would not match
+  // the fallback's "/opt/homebrew/bin" and a redundant entry would be added.
+  const norm = (d: string) => d.replace(/\/+$/, "") || "/";
   const existing = (env.PATH || "").split(":").filter(Boolean);
-  const seen = new Set(existing);
+  const seen = new Set(existing.map(norm));
   const extra: string[] = [];
   for (const dir of FALLBACK_PATH_DIRS) {
     const abs = dir.startsWith("~/") ? `${home}/${dir.slice(2)}` : dir;
-    if (!seen.has(abs)) {
-      seen.add(abs);
+    if (!seen.has(norm(abs))) {
+      seen.add(norm(abs));
       extra.push(abs);
     }
   }

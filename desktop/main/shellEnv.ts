@@ -24,6 +24,16 @@ export function probeLoginEnv(timeoutMs: number = PROBE_TIMEOUT_MS): Promise<Env
         // Never reject: a failed probe is a fact to work around, not an error
         // to propagate. A shell that prints a banner still succeeds, because
         // parseEnvOutput skips anything that is not an assignment.
+        //
+        // A maxBuffer overflow hands back TRUNCATED stdout alongside the
+        // error, so `stdout` being truthy is not proof of success. Accepting
+        // a buffer cut mid-value would give a child a corrupted credential
+        // (e.g. a truncated ANTHROPIC_AUTH_TOKEN), which fails downstream
+        // with an auth error instead of falling back here -- worse than
+        // resolving null. Never log err.message or any part of stdout: both
+        // can carry a secret value.
+        const e = err as (Error & { code?: string }) | null;
+        if (e?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") return resolve(null);
         if (!stdout) return resolve(null);
         try {
           const parsed = parseEnvOutput(stdout);
@@ -31,7 +41,6 @@ export function probeLoginEnv(timeoutMs: number = PROBE_TIMEOUT_MS): Promise<Env
         } catch {
           resolve(null);
         }
-        void err;
       });
   });
 }
