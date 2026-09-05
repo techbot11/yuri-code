@@ -4669,6 +4669,50 @@ a.miss-row {
 
 .setup-check .tf-hint { grid-column: 2; }
 
+/* The per-check fix affordance (spec §6.2): a link for a URL, the command
+   plus a copy button for a command. Sits in the detail column, under it. */
+.setup-fix {
+   grid-column: 2;
+   display: flex;
+   align-items: center;
+   gap: 8px;
+   flex-wrap: wrap;
+   margin-top: 4px;
+   font-size: 12px;
+   color: var(--acc);
+   text-decoration: none;
+}
+
+a.setup-fix:hover {
+   text-decoration: underline;
+}
+
+.setup-fix-cmd {
+   font-family: var(--mono);
+   font-size: 12px;
+   color: var(--ink);
+   background: var(--panel2);
+   border: 1px solid var(--line);
+   border-radius: 6px;
+   padding: 2px 7px;
+   user-select: all;
+}
+
+.setup-fix .txtoggle {
+   font-size: 11px;
+   padding: 2px 8px;
+}
+
+/* A save that the user's own shell will undo at the next start. Warn, not
+   danger: the save DOES work now — see lib/setup.ts's shadowedByShell. */
+.setup-shadow {
+   display: block;
+   margin-top: 3px;
+   font-size: 11.5px;
+   line-height: 1.45;
+   color: var(--warn);
+}
+
 .setup-keys {
    display: flex;
    flex-direction: column;

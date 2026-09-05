@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.dirname(__file__))
 
 import config  # noqa: E402
-from yuri import setup_store  # noqa: E402
+from yuri import doctor, setup_store  # noqa: E402
 
 SECRET = "sk-proj-do-not-leak-me-9f31"
 
@@ -49,6 +49,19 @@ class _Harness(unittest.TestCase):
         ]
         [p.start() for p in self.patches]
         self.addCleanup(lambda: [p.stop() for p in self.patches])
+        # PUT /yuri/config stamps config.ENV_SOURCES[name] = "Setup". That dict
+        # is MODULE-LEVEL state and mock.patch.dict(os.environ) does not touch
+        # it, so without this a PUT here leaks a bogus provenance into every
+        # later test -- `_source_of` would answer "Setup" for a key the next
+        # test set in the real environment, quietly turning a provenance
+        # assertion into a false pass.
+        _sources = dict(config.ENV_SOURCES)
+
+        def _restore_sources():
+            config.ENV_SOURCES.clear()
+            config.ENV_SOURCES.update(_sources)
+        self.addCleanup(_restore_sources)
+
         self.c = yapp.test_container(home, FakeAgentProvider())
 
         self.denied = False
@@ -76,9 +89,73 @@ class DoctorEndpoint(_Harness):
         self.assertIsInstance(body["ok"], bool)
 
     def test_ok_reflects_required_checks_only(self):
-        r = self.client.get("/yuri/doctor").json()
-        expected = all(c["ok"] for c in r["checks"] if c["required"])
-        self.assertEqual(r["ok"], expected)
+        """The distinguishing case, constructed rather than derived.
+
+        This used to compute `expected` from the same response body, so it
+        passed whether the endpoint returned `all(required)` or `all(checks)`
+        -- it could not fail on the thing it named. `yuri doctor`'s CLI side
+        of the same split IS properly pinned (tests/test_doctor.py's
+        test_main_reports_every_failure_but_required_gates_the_app); this
+        mirrors it: every REQUIRED check passing with a non-required one
+        failing must still be ok=True, or a missing tmux gates the whole app.
+        """
+        rows = [
+            doctor.Check("home", True, "/x", True),
+            doctor.Check("database", True, "/x.db", True),
+            doctor.Check("claude", True, "/usr/bin/claude", True),
+            doctor.Check("voice keys", True, "GEMINI_API_KEY", True),
+            doctor.Check("tmux", False, "not on PATH", False),
+        ]
+        with mock.patch.object(doctor, "checks", lambda: rows):
+            body = self.client.get("/yuri/doctor").json()
+        self.assertTrue(body["ok"],
+                        "a failing OPTIONAL check must not gate the app")
+        self.assertFalse(next(c for c in body["checks"] if c["name"] == "tmux")["ok"],
+                         "and it must still be REPORTED as failing")
+
+    def test_a_failing_required_check_makes_it_not_ok(self):
+        # The other half: proves the test above is about `required`, not about
+        # the endpoint answering True unconditionally.
+        rows = [doctor.Check("claude", False, "not on PATH", True),
+                doctor.Check("tmux", True, "/usr/bin/tmux", False)]
+        with mock.patch.object(doctor, "checks", lambda: rows):
+            self.assertFalse(self.client.get("/yuri/doctor").json()["ok"])
+
+    def test_a_failing_check_carries_the_action_that_fixes_it(self):
+        """Spec §6.2: each failing check carries its fix, as data. Parsing it
+        back out of `detail` in the UI is what this replaces."""
+        with mock.patch.object(doctor.shutil, "which", lambda n: None):
+            checks = {c["name"]: c for c in self.client.get("/yuri/doctor").json()["checks"]}
+        self.assertEqual(checks["claude"]["fix"],
+                         {"kind": "url", "payload": doctor.CLAUDE_INSTALL_URL,
+                          "label": "How to install Claude Code"})
+        self.assertEqual(checks["tmux"]["fix"]["kind"], "command")
+        self.assertEqual(checks["tmux"]["fix"]["payload"], "brew install tmux")
+
+    def test_a_check_without_a_fix_omits_the_field_entirely(self):
+        """`fix` is optional: a passing check has none, and neither does a
+        failing one with no single action that fixes it (a broken database is
+        not a link). Omitted rather than null so nothing has to be taught to
+        ignore an empty one."""
+        with mock.patch.object(doctor.shutil, "which", lambda n: "/usr/bin/" + n):
+            checks = {c["name"]: c for c in self.client.get("/yuri/doctor").json()["checks"]}
+        self.assertNotIn("fix", checks["claude"], "a PASSING check offers no fix")
+        self.assertNotIn("fix", checks["tmux"])
+        self.assertNotIn("fix", checks["database"])
+
+    def test_a_userinfo_bearing_opencode_url_never_reaches_a_detail(self):
+        """Ruling 9. OPENCODE_SERVER_PASSWORD is not the only way a password
+        reaches doctor -- `https://user:token@host` is an ordinary way to
+        write one, and every detail here is returned verbatim over HTTP."""
+        with mock.patch.object(config, "OPENCODE_URL",
+                               f"http://user:{SECRET}@127.0.0.1:4096"):
+            r = self.client.get("/yuri/doctor")
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(SECRET, r.text)
+        self.assertNotIn("user:", r.text)
+        # And the URL is still IDENTIFIED, or the masking made the line useless.
+        line = next(c["detail"] for c in r.json()["checks"] if c["name"] == "opencode")
+        self.assertIn("127.0.0.1:4096", line)
 
 
 class ConfigRead(_Harness):
@@ -89,6 +166,36 @@ class ConfigRead(_Harness):
         self.assertEqual(r.status_code, 200)
         self.assertNotIn(SECRET, r.text)
         self.assertNotIn(SECRET[:14], r.text)
+
+    def test_no_managed_key_value_ever_reaches_the_client(self):
+        """Spec §10 asks for this against EVERY managed key, not the two
+        someone happened to write a test for -- an eight-key registry checked
+        two at a time is a leak nobody notices until a human reads the JSON.
+
+        Two passes, because "value" means two different things here:
+
+        * a SECRET's value must never appear at all;
+        * a NON-secret's value is shown on purpose (a base URL or a model name
+          with no hint is a field the user cannot verify) -- but a credential
+          written into its userinfo is still a credential, so that must not
+          appear for ANY key, secret or not.
+        """
+        for k in config.MANAGED_KEYS:
+            secret = f"{SECRET}-{k.name.lower()}"
+            with self.subTest(key=k.name, pass_="plain value"):
+                with mock.patch.dict(os.environ, {k.name: secret}):
+                    r = self.client.get("/yuri/config")
+                self.assertEqual(r.status_code, 200)
+                if k.secret:
+                    self.assertNotIn(secret, r.text)
+                    self.assertNotIn(secret[:14], r.text)
+            with self.subTest(key=k.name, pass_="credential in url userinfo"):
+                with mock.patch.dict(os.environ,
+                                     {k.name: f"https://u:{secret}@gw.example/v1"}):
+                    r = self.client.get("/yuri/config")
+                self.assertEqual(r.status_code, 200)
+                self.assertNotIn(secret, r.text)
+                self.assertNotIn("u:", r.text)
 
     def test_reports_presence_and_a_hint_for_every_managed_key(self):
         with mock.patch.dict(os.environ, {"GEMINI_API_KEY": SECRET}):
@@ -349,6 +456,63 @@ class SetupRouteAccess(_Harness):
         self.assertNotIn(SECRET, r.text)
 
 
+class ConfigPathField(_Harness):
+    def test_both_endpoints_report_the_same_field_meaning_the_same_thing(self):
+        """`path` used to be the config DIRECTORY on GET and the .env FILE on
+        PUT -- one field, two types, one resource, so a client showing
+        "saved to {path}" named different things depending on which call it
+        had made last."""
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            got = self.client.get("/yuri/config").json()["path"]
+            put = self.client.put("/yuri/config",
+                                  json={"values": {"ANTHROPIC_MODEL": "m"}}).json()["path"]
+        self.assertEqual(got, put)
+        self.assertTrue(got.endswith("/.env"), got)
+
+
+class ConfigWriteControlChars(_Harness):
+    def test_a_nul_in_a_value_is_refused_rather_than_half_applied(self):
+        """clean_value() strips whitespace and truncates at a newline; a NUL
+        survives both. It then landed in the FILE and blew up on
+        `os.environ[name] = clean` ("ValueError: embedded null byte") -- a 500
+        after the write, with the corrupt value loading at the next boot and
+        file and process permanently diverged."""
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            r = self.client.put("/yuri/config",
+                                json={"values": {"ANTHROPIC_MODEL": "a\x00b"}})
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("ANTHROPIC_MODEL", r.json()["detail"])
+        self.assertFalse(os.path.isfile(os.path.join(self.tmp.name, ".env")),
+                         "nothing may be written before the refusal")
+
+    def test_the_refusal_names_the_key_and_never_the_value(self):
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name):
+            r = self.client.put("/yuri/config",
+                                json={"values": {"GEMINI_API_KEY": SECRET + "\x00x"}})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("GEMINI_API_KEY", r.json()["detail"])
+        self.assertNotIn(SECRET, r.text)
+
+    def test_other_control_characters_are_refused_too(self):
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name):
+            for raw in ("a\tb", "a\x1bb", "a\x7fb"):
+                with self.subTest(raw=repr(raw)):
+                    r = self.client.put("/yuri/config",
+                                        json={"values": {"ANTHROPIC_MODEL": raw}})
+                    self.assertEqual(r.status_code, 400, r.text)
+
+    def test_an_ordinary_value_still_saves(self):
+        # Proves the guard is about control characters and not about anything
+        # a real key or model name contains.
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            r = self.client.put("/yuri/config",
+                                json={"values": {"ANTHROPIC_MODEL": "claude-opus-5"}})
+        self.assertEqual(r.status_code, 200, r.text)
+
+
 class StoreDirectly(unittest.TestCase):
     """Deliberately NOT a _Harness subclass: these touch the store alone and
     need no app, no container and no home."""
@@ -359,6 +523,58 @@ class StoreDirectly(unittest.TestCase):
             path = setup_store.write({"GEMINI_API_KEY": SECRET}, config_dir=target)
             self.assertTrue(os.path.isfile(path))
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
+    def test_target_path_is_the_env_file_inside_target_dir(self):
+        with mock.patch.object(setup_store, "target_dir", lambda: "/tmp/whatever"):
+            self.assertEqual(setup_store.target_path(), "/tmp/whatever/.env")
+
+    def test_an_already_loose_config_dir_is_tightened(self):
+        """`mode=` on os.makedirs applies only to directories it CREATES, so
+        an existing 0755 dir kept its permissions -- and while the .env inside
+        is 0600, a group- or world-writable directory lets anyone who can
+        write it swap the whole file out."""
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, "config")
+            os.makedirs(target)
+            os.chmod(target, 0o755)
+            setup_store.write({"GEMINI_API_KEY": SECRET}, config_dir=target)
+            self.assertEqual(os.stat(target).st_mode & 0o777, 0o700)
+
+    def test_a_symlink_planted_at_the_env_path_is_not_followed_on_READ(self):
+        """The read is not passive: whatever `_read` parses gets MERGED into
+        the file this module rewrites at 0600, which the backend then loads as
+        environment at every boot. A symlink at <dir>/.env would have had its
+        target's `IDENT=...` lines copied straight into it."""
+        with tempfile.TemporaryDirectory() as d:
+            planted = os.path.join(d, "planted")
+            with open(planted, "w") as f:
+                f.write("VC_AUTH_TOKEN=hijacked\nOPENAI_API_KEY=stolen-from-elsewhere\n")
+            target = os.path.join(d, "config")
+            os.makedirs(target)
+            os.symlink(planted, os.path.join(target, ".env"))
+
+            path = setup_store.write({"ANTHROPIC_MODEL": "m"}, config_dir=target)
+
+            with open(path) as f:
+                text = f.read()
+            self.assertNotIn("hijacked", text)
+            self.assertNotIn("stolen-from-elsewhere", text)
+            self.assertIn("ANTHROPIC_MODEL=m", text)
+            # os.replace renames OVER the symlink rather than through it, so
+            # the planted target is untouched too.
+            self.assertFalse(os.path.islink(path))
+            with open(planted) as f:
+                self.assertIn("hijacked", f.read())
+
+    def test_an_ordinary_existing_file_is_still_merged(self):
+        # Proves the O_NOFOLLOW read did not turn every read into "no file".
+        with tempfile.TemporaryDirectory() as d:
+            setup_store.write({"ANTHROPIC_MODEL": "m1"}, config_dir=d)
+            setup_store.write({"ANTHROPIC_BASE_URL": "u1"}, config_dir=d)
+            with open(os.path.join(d, ".env")) as f:
+                text = f.read()
+            self.assertIn("ANTHROPIC_MODEL=m1", text)
+            self.assertIn("ANTHROPIC_BASE_URL=u1", text)
 
     def test_a_value_with_a_newline_cannot_forge_a_second_line(self):
         # A pasted value with a newline would otherwise inject a key.

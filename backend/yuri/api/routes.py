@@ -58,6 +58,11 @@ def _by(request: Request) -> str:
     return "ui" if request.headers.get("origin") else "api"
 
 
+def _display_path(path: str) -> str:
+    """`~`-abbreviated, for showing a user where their config lives."""
+    return path.replace(os.path.expanduser("~"), "~", 1)
+
+
 async def require_strict_origin(request: Request) -> None:
     """Extra gate for the Setup routes, ON TOP OF the router's require_auth.
 
@@ -390,16 +395,27 @@ def build_router(require_auth: Callable) -> APIRouter:
         app."""
         rows = await asyncio.to_thread(doctor.checks)
         return {"checks": [{"name": c.name, "ok": c.ok, "detail": c.detail,
-                            "required": c.required} for c in rows],
+                            "required": c.required,
+                            # Optional: only the checks that HAVE a fix
+                            # affordance carry one. `detail` is untouched --
+                            # the CLI prints it.
+                            **({"fix": {"kind": c.fix.kind,
+                                        "payload": c.fix.payload,
+                                        "label": c.fix.label}} if c.fix else {})}
+                           for c in rows],
                 "ok": all(c.ok for c in rows if c.required)}
 
     @r.get("/config", dependencies=[SETUP_ROUTE_GUARD])
     async def read_config():
         """Managed settings: presence, a masked hint, provenance, and what a
-        change takes effect on. NEVER a value."""
+        change takes effect on. NEVER a value.
+
+        `path` is the FILE, matching PUT's `path`: one resource, one field,
+        one type. It used to be the containing directory here and the file
+        there, which made a client that showed "saved to {path}" name two
+        different things depending on which call it had made last."""
         return {"keys": config.managed_status(),
-                "path": setup_store.target_dir().replace(
-                    os.path.expanduser("~"), "~", 1)}
+                "path": _display_path(setup_store.target_path())}
 
     @r.put("/config", dependencies=[SETUP_ROUTE_GUARD])
     async def write_config(body: ConfigUpdate):
@@ -428,6 +444,20 @@ def build_router(require_auth: Callable) -> APIRouter:
             raise HTTPException(
                 status_code=400,
                 detail=f"value contains a newline: {', '.join(bad)}")
+        # And any OTHER control character, NUL above all. clean_value() strips
+        # only whitespace and truncates at a newline, so a NUL survives into
+        # the file -- and then `os.environ[name] = clean` raises
+        # "ValueError: embedded null byte", which is a 500 AFTER the file was
+        # already rewritten. The corrupt value then loads at the next boot,
+        # with file and process permanently diverged. Refuse it up front,
+        # naming only the KEY: the value may be the secret.
+        ctrl = sorted(name for name, raw in body.values.items()
+                      if any(ord(ch) < 0x20 or ord(ch) == 0x7F
+                             for ch in (raw or "").strip("\r\n")))
+        if ctrl:
+            raise HTTPException(
+                status_code=400,
+                detail=f"value contains a control character: {', '.join(ctrl)}")
         path = await asyncio.to_thread(setup_store.write, dict(body.values))
         # Also update THIS process's environment. Both voice_keys_found() and
         # allowed_project_roots() read os.getenv live, so a file write alone
@@ -449,7 +479,7 @@ def build_router(require_auth: Callable) -> APIRouter:
         order = ("now", "next-session", "restart")
         effects = [e for e in order if any(known[n].effect == e for n in written)]
         return {"written": written, "effects": effects,
-                "path": path.replace(os.path.expanduser("~"), "~", 1)}
+                "path": _display_path(path)}
 
     @r.get("/templates")
     async def list_templates():

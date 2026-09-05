@@ -1,5 +1,11 @@
 """`yuri doctor` — local environment checks. Prints one line per check;
-exit 0 when everything required is present."""
+exit 0 only when EVERY check passes.
+
+Not "everything required": `main()` answers "is anything wrong here", which is
+what a checkup is for, while REQUIRED_CHECKS answers the different question of
+what gates the UI (spec §6.2). A doctor that says "ok" with tmux missing is a
+worse tool — see main()'s own comment, and the ruling that reverted the
+earlier required-only exit code."""
 from __future__ import annotations
 
 import asyncio
@@ -14,13 +20,35 @@ from yuri.store.sqlite import SCHEMA_VERSION, SqliteStore
 
 
 @dataclass(frozen=True)
+class Fix:
+    """The action that fixes a failing check (spec §6.2), as data rather than
+    as prose the UI has to parse back out of `detail`.
+
+    `kind` is closed: "url" means open it, "command" means offer it as
+    copyable text. A UI that meets an unknown kind should render nothing
+    rather than guess."""
+    kind: str      # "url" | "command"
+    payload: str   # the URL to open, or the command to copy
+    label: str     # what the control says
+
+
+FIX_KINDS: frozenset[str] = frozenset({"url", "command"})
+
+
+@dataclass(frozen=True)
 class Check:
     """One environment check, as data. `required` means Yuri cannot work
-    without it — see REQUIRED_CHECKS for why tmux is not one of them."""
+    without it — see REQUIRED_CHECKS for why tmux is not one of them.
+
+    `fix` is OPTIONAL: most checks have no single action that fixes them (a
+    failing database is not a link), and those are unchanged by its arrival.
+    `detail` is untouched by it too — the CLI prints `detail` and nothing
+    else, so the two surfaces stay in step."""
     name: str
     ok: bool
     detail: str
     required: bool
+    fix: Fix | None = None
 
 
 # Yuri cannot work at all without these. tmux is absent on purpose: without
@@ -30,8 +58,17 @@ class Check:
 REQUIRED_CHECKS: frozenset[str] = frozenset({"home", "database", "claude", "voice keys"})
 
 
-def _check(name: str, ok: bool, detail: str) -> Check:
-    return Check(name=name, ok=ok, detail=detail, required=name in REQUIRED_CHECKS)
+CLAUDE_INSTALL_URL = "https://docs.claude.com/en/docs/claude-code/overview"
+TMUX_INSTALL_COMMAND = "brew install tmux"
+
+
+def _check(name: str, ok: bool, detail: str, fix: Fix | None = None) -> Check:
+    # A fix only rides along on a FAILING check: "here is how to install
+    # claude" beside a green tick is noise, and a UI would have to decide not
+    # to show it anyway.
+    return Check(name=name, ok=ok, detail=detail,
+                 required=name in REQUIRED_CHECKS,
+                 fix=None if ok else fix)
 
 
 def _opencode_reachable() -> bool:
@@ -54,8 +91,16 @@ def _opencode_reachable() -> bool:
 
 def _opencode_status() -> tuple[str, str]:
     """(status, detail) for the OpenCode line: attached, spawnable or
-    unavailable. Names the URL and the binary; never the password."""
-    url = config.OPENCODE_URL
+    unavailable. Names the URL and the binary; never a credential.
+
+    The URL is userinfo-stripped before it goes anywhere near a detail string.
+    `OPENCODE_SERVER_PASSWORD` is not the only way a password reaches this
+    module: `https://user:token@host:4096` is a perfectly ordinary way to
+    write one, and every one of these details is returned verbatim by
+    GET /yuri/doctor. `config.strip_url_userinfo` exists for exactly this
+    (it is what keeps ANTHROPIC_BASE_URL's hint clean) -- the probe still uses
+    the real `config.OPENCODE_URL`, only the human-readable text is masked."""
+    url = config.strip_url_userinfo(config.OPENCODE_URL)
     if _opencode_reachable():
         return "attached", (f"attached · a server is already answering at {url} "
                             "— Yuri will use it and never stop it")
@@ -123,11 +168,13 @@ def checks() -> list[Check]:
 
     claude = shutil.which("claude")
     out.append(_check("claude", claude is not None,
-                      claude or "not on PATH — install Claude Code"))
+                      claude or "not on PATH — install Claude Code",
+                      Fix("url", CLAUDE_INSTALL_URL, "How to install Claude Code")))
     tmux = shutil.which("tmux")
     out.append(_check("tmux", tmux is not None,
-                      tmux or "not on PATH — brew install tmux. Without it the live "
-                              "terminal pane is unavailable; agents still run."))
+                      tmux or f"not on PATH — {TMUX_INSTALL_COMMAND}. Without it the live "
+                              "terminal pane is unavailable; agents still run.",
+                      Fix("command", TMUX_INSTALL_COMMAND, "Copy install command")))
     keys = config.voice_keys_found()
     out.append(_check("voice keys", bool(keys),
                       ", ".join(f"{k} ({src})" for k, src in keys)

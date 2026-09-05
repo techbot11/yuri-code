@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  blocking, canSave, effectLabel, effectsSentence, gateOpen, pendingChanges,
+  blocking, canSave, effectLabel, effectsSentence, fixAction, gateOpen,
+  pendingChanges, shadowedByShell, shellShadowWarning, SHELL_SOURCE,
   type DoctorCheck, type ManagedKey,
 } from "./setup.ts";
 
@@ -90,4 +91,100 @@ test("save needs at least one pending change", () => {
   assert.equal(canSave(keys, {}), false);
   assert.equal(canSave(keys, { ANTHROPIC_MODEL: "  " }), false, "whitespace is not a value");
   assert.equal(canSave(keys, { ANTHROPIC_MODEL: "claude-opus-5" }), true);
+});
+
+// --- the per-check fix affordance (spec §6.2) --------------------------------
+
+test("a failing check's URL fix becomes a link", () => {
+  const a = fixAction(check({
+    name: "claude", ok: false, required: true,
+    fix: {
+      kind: "url",
+      payload: "https://docs.claude.com/en/docs/claude-code/overview",
+      label: "How to install Claude Code",
+    },
+  }));
+  assert.deepEqual(a, {
+    kind: "url",
+    href: "https://docs.claude.com/en/docs/claude-code/overview",
+    label: "How to install Claude Code",
+  });
+});
+
+test("a failing check's command fix becomes copyable text", () => {
+  const a = fixAction(check({
+    name: "tmux", ok: false, required: false,
+    fix: { kind: "command", payload: "brew install tmux", label: "Copy install command" },
+  }));
+  assert.deepEqual(a, {
+    kind: "command", command: "brew install tmux", label: "Copy install command",
+  });
+});
+
+test("a PASSING check offers no fix, even when one came down the wire", () => {
+  // "Here is how to install claude" beside a green tick is noise. The backend
+  // drops it too — this is the second of the two places that must agree.
+  assert.equal(fixAction(check({
+    ok: true, fix: { kind: "url", payload: "https://example.com", label: "x" },
+  })), null);
+});
+
+test("a check with no fix renders nothing", () => {
+  assert.equal(fixAction(check({ name: "database", ok: false })), null);
+  assert.equal(fixAction(check({ name: "database", ok: false, fix: null })), null);
+});
+
+test("an UNKNOWN fix kind renders nothing rather than guessing", () => {
+  // A newer backend adding a kind must not put a mystery control on the one
+  // screen that has to work when everything else is broken.
+  assert.equal(fixAction(check({
+    ok: false, fix: { kind: "restart", payload: "whatever", label: "Do it" },
+  })), null);
+});
+
+test("a url fix whose scheme is not http(s) never becomes an href", () => {
+  // An unchecked scheme is a javascript:/data: sink one backend bug away.
+  for (const payload of ["javascript:alert(1)", "data:text/html,<b>",
+                         "file:///etc/passwd", "//evil.example.com"]) {
+    assert.equal(
+      fixAction(check({ ok: false, fix: { kind: "url", payload, label: "Open" } })),
+      null, payload);
+  }
+});
+
+test("an empty payload is not an affordance", () => {
+  assert.equal(fixAction(check({
+    ok: false, fix: { kind: "command", payload: "   ", label: "Copy" },
+  })), null);
+});
+
+// --- a save the user's own shell will undo (spec §6.3) ----------------------
+
+test("a value exported in the shell is flagged as shadowing a save", () => {
+  // Precedence is real environment > config dir > $YURI_HOME/config/.env >
+  // backend/.env. PUT writes the file AND os.environ, so the save works now
+  // and silently reverts at the next start — while reporting "takes effect
+  // straight away". This warning is all that stands between the user and that.
+  const k = key({ set: true, source: SHELL_SOURCE, hint: "…9f31" });
+  assert.equal(shadowedByShell(k), true);
+  const warning = shellShadowWarning(k);
+  assert.match(warning, /GEMINI_API_KEY/);
+  assert.match(warning, /shell/);
+  assert.match(warning, /next time Yuri starts/);
+});
+
+test("a value from a file Setup can write is not flagged", () => {
+  for (const source of ["Setup", "~/Yuri/config/.env", "backend/.env",
+                        "~/.config/yapcode/.env"]) {
+    const k = key({ set: true, source });
+    assert.equal(shadowedByShell(k), false, source);
+    assert.equal(shellShadowWarning(k), "", source);
+  }
+});
+
+test("an UNSET key is never flagged, whatever its source says", () => {
+  // `source` reads "not set" then, and there is nothing for the shell to
+  // shadow — a warning here would land on every empty field.
+  assert.equal(shadowedByShell(key({ set: false, source: SHELL_SOURCE })), false);
+  assert.equal(shellShadowWarning(key({ set: false, source: SHELL_SOURCE })), "");
 });

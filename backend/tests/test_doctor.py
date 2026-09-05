@@ -108,6 +108,57 @@ class Doctor(unittest.TestCase):
         self.assertNotIn("tmux", doctor.REQUIRED_CHECKS)
         self.assertNotIn("opencode", doctor.REQUIRED_CHECKS)
 
+    def test_a_password_in_the_opencode_url_reaches_no_detail(self):
+        """Ruling 9. OPENCODE_SERVER_PASSWORD is not the only way a password
+        gets here: `https://user:token@host:4096` is an ordinary way to write
+        one, and every detail is printed by the CLI and returned verbatim by
+        GET /yuri/doctor."""
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.object(config, "YURI_HOME", os.path.join(d, "Yuri")), \
+             mock.patch.object(config, "OPENCODE_URL",
+                               "http://user:hunter2@127.0.0.1:4096"):
+            rows = doctor.checks()
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                doctor.main([])
+        for c in rows:
+            self.assertNotIn("hunter2", c.detail, c.name)
+            self.assertNotIn("user:", c.detail, c.name)
+        self.assertNotIn("hunter2", buf.getvalue())
+        # Still identifies WHICH server, or the masking made the line useless.
+        opencode = next(c for c in rows if c.name == "opencode")
+        self.assertIn("127.0.0.1:4096", opencode.detail)
+
+    def test_a_failing_check_carries_the_action_that_fixes_it(self):
+        """Spec §6.2, as DATA on the record rather than prose the UI has to
+        parse back out of `detail` -- and `detail` is unchanged by it, since
+        the CLI prints that and nothing else."""
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.object(config, "YURI_HOME", os.path.join(d, "Yuri")), \
+             mock.patch.object(doctor.shutil, "which", lambda n: None):
+            rows = {c.name: c for c in doctor.checks()}
+        self.assertEqual(rows["claude"].fix,
+                         doctor.Fix("url", doctor.CLAUDE_INSTALL_URL,
+                                    "How to install Claude Code"))
+        self.assertEqual(rows["tmux"].fix.kind, "command")
+        self.assertEqual(rows["tmux"].fix.payload, "brew install tmux")
+        self.assertIn(rows["tmux"].fix.kind, doctor.FIX_KINDS)
+        self.assertIn(rows["claude"].fix.kind, doctor.FIX_KINDS)
+        # The command is still in the detail line, because the CLI has no
+        # affordance to render -- prose is all it has.
+        self.assertIn("brew install tmux", rows["tmux"].detail)
+
+    def test_a_passing_check_carries_no_fix(self):
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch.object(config, "YURI_HOME", os.path.join(d, "Yuri")), \
+             mock.patch.dict(os.environ, {"ALLOWED_PROJECT_ROOTS": d,
+                                          "GEMINI_API_KEY": "x"}), \
+             mock.patch.object(doctor.shutil, "which", lambda n: "/usr/bin/" + n):
+            rows = doctor.checks()
+        for c in rows:
+            if c.ok:
+                self.assertIsNone(c.fix, f"{c.name} passes and still offers a fix")
+
     def test_main_reports_every_failure_but_required_gates_the_app(self):
         # Two different questions with two different answers: the CLI's exit
         # code is "is anything wrong", REQUIRED_CHECKS is "is Yuri usable".

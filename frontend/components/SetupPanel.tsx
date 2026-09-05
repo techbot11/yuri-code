@@ -10,10 +10,39 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, yget, yput } from "@/lib/api";
 import {
-  blocking, canSave, effectsSentence, pendingChanges,
+  blocking, canSave, effectsSentence, fixAction, pendingChanges,
+  shellShadowWarning,
   type DoctorCheck, type Effect, type ManagedKey,
 } from "@/lib/setup";
 import { ViewError } from "./ViewError";
+
+// The copy control for a `command` fix. Local because it owns one piece of
+// throwaway state (the "Copied" confirmation) and nothing else needs it; the
+// DECISION of whether to render it at all is fixAction()'s, in lib/setup.ts,
+// where a test can reach it.
+function CopyCommand({ command, label }: { command: string; label: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <span className="setup-fix">
+      <code className="setup-fix-cmd">{command}</code>
+      <button
+        type="button"
+        className="txtoggle"
+        aria-label={`${label}: ${command}`}
+        onClick={() => {
+          // clipboard is unavailable over plain http on a LAN address, and
+          // the user can still select the command text — so a failure must
+          // not throw, it just doesn't say "Copied".
+          void navigator.clipboard?.writeText(command)
+            .then(() => setDone(true))
+            .catch(() => setDone(false));
+        }}
+      >
+        {done ? "Copied" : label}
+      </button>
+    </span>
+  );
+}
 
 export function SetupPanel({ onPass }: { onPass?: () => void }) {
   const [checks, setChecks] = useState<DoctorCheck[] | null>(null);
@@ -119,28 +148,45 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
       )}
 
       <div className="setup-checks">
-        {checks.map((c) => (
-          <div key={c.name} className={`setup-check ${c.ok ? "ok" : c.required ? "bad" : "warn"}`}>
-            <span className="setup-check-name">{c.name}</span>
-            <span className="setup-check-detail">{c.detail}</span>
-            {!c.ok && !c.required && (
-              <span className="tf-hint">Optional — she works without it.</span>
-            )}
-          </div>
-        ))}
+        {checks.map((c) => {
+          // Spec §6.2: a failing check carries the action that fixes it.
+          const fix = fixAction(c);
+          return (
+            <div key={c.name} className={`setup-check ${c.ok ? "ok" : c.required ? "bad" : "warn"}`}>
+              <span className="setup-check-name">{c.name}</span>
+              <span className="setup-check-detail">{c.detail}</span>
+              {fix?.kind === "url" && (
+                <a className="setup-fix" href={fix.href} target="_blank" rel="noreferrer noopener">
+                  {fix.label} →
+                </a>
+              )}
+              {fix?.kind === "command" && (
+                <CopyCommand command={fix.command} label={fix.label} />
+              )}
+              {!c.ok && !c.required && (
+                <span className="tf-hint">Optional — she works without it.</span>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       <div className="mcp-head" style={{ marginTop: 22 }}>
         <h3 className="sectitle">Keys and models</h3>
       </div>
       <p className="mcp-blurb">
-        Saved to <code>{where}</code>, readable only by you. Yuri never sends a saved
-        value back to this screen, so a key field starts empty — leave it that way to
-        keep the current one.
+        Saved to <code>{where}</code>, readable only by you — the same file{" "}
+        <code>yapcode config</code> edits. Yuri never sends a saved value back to this
+        screen, so a key field starts empty — leave it that way to keep the current one.
       </p>
 
       <div className="setup-keys">
-        {keys.map((k) => (
+        {keys.map((k) => {
+          // A value exported in the user's shell beats every file Setup can
+          // write, so a save here works now and reverts at the next start.
+          // Said BEFORE the save, on the field.
+          const shadow = shellShadowWarning(k);
+          return (
           <label className="tf-field" key={k.name}>
             <span className="tf-label">
               {k.label}
@@ -159,8 +205,10 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
               }}
             />
             <span className="tf-hint">{k.blurb}</span>
+            {shadow && <span className="setup-shadow">{shadow}</span>}
           </label>
-        ))}
+          );
+        })}
       </div>
 
       {saveError && <pre className="mcp-err">{saveError}</pre>}
