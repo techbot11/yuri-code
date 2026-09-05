@@ -58,7 +58,8 @@ import {
   type NarrationMode,
   type SpokenGate,
 } from "@/lib/narration";
-import { nextUnanswered, pollVerdict, type ToolEnvelope } from "@/lib/polling";
+import { POLL_INTERVAL_MS, POLL_TIMEOUT_MS, nextUnanswered, pollVerdict,
+         type ToolEnvelope } from "@/lib/polling";
 import { type TimelineItem } from "@/lib/timeline";
 import { type Sess } from "@/lib/sessions";
 import { type ToolDef } from "@/lib/voice";
@@ -333,13 +334,26 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
   // `undefined` with the reason thrown away — the poll loop read exactly that
   // as "still working" and asked a dead session the same question every 1.5s
   // forever. Anything that needs to tell an error from a result uses this.
-  const execTool = useCallback(async (name: string, args: Record<string, unknown>): Promise<ToolEnvelope> => {
-    const r = await fetch("/api/tools/execute", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
-      body: JSON.stringify({ name, arguments: args }),
-    });
-    return (await r.json()) as ToolEnvelope;
+  // `timeoutMs` is opt-in, and deliberately absent by default: starting a
+  // session or driving a Claude turn legitimately takes minutes, and
+  // /api/tools/execute allows 800s for exactly that. A HEARTBEAT must not
+  // inherit that ceiling -- an unanswered poll that holds a connection for
+  // thirteen minutes is how the app ran out of them.
+  const execTool = useCallback(async (name: string, args: Record<string, unknown>,
+                                      opts?: { timeoutMs?: number }): Promise<ToolEnvelope> => {
+    const ctl = opts?.timeoutMs ? new AbortController() : null;
+    const timer = ctl ? setTimeout(() => ctl.abort(), opts!.timeoutMs) : null;
+    try {
+      const r = await fetch("/api/tools/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ name, arguments: args }),
+        signal: ctl?.signal,
+      });
+      return (await r.json()) as ToolEnvelope;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }, []);
 
   const callTool = useCallback(async (name: string, args: Record<string, unknown>): Promise<unknown> => {
@@ -391,14 +405,26 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     // every unusable response as "keep going", which produced 329 log events
     // for one stopped session and would have produced them indefinitely.
     let unanswered = 0;
+    let inFlight = false;
     const timer = setInterval(async () => {
+      // setInterval fires on schedule whether or not the last poll returned.
+      // Without this guard, a server slower than the interval -- a Next
+      // dev-mode recompile is enough -- means one more outstanding request
+      // every tick, forever, per session. Three sessions reached seventeen
+      // pending requests, which exhausts the browser's six connections per
+      // origin and starves the whole app, page loads included. Skipping a
+      // tick self-throttles to whatever the server can actually answer.
+      if (inFlight) return;
+      inFlight = true;
       let env: ToolEnvelope;
       try {
-        env = await execTool("poll_session", { session_id: sessionId });
+        env = await execTool("poll_session", { session_id: sessionId },
+                             { timeoutMs: POLL_TIMEOUT_MS });
       } catch (e) {
         // The request itself failed (backend down, network). Same bound.
         env = { ok: false, error: (e as Error)?.message || "the request failed" };
       }
+      inFlight = false;
       const verdict = pollVerdict(env, unanswered);
       unanswered = nextUnanswered(env, unanswered);
       if (verdict.action === "wait") return;
@@ -413,7 +439,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
         logDebug("poll", `stopped polling: ${verdict.reason}`, { session: sessionId },
                  "backend", "voice");
       }
-    }, 1500);
+    }, POLL_INTERVAL_MS);
     pollTimers.current.set(sessionId, timer);
   };
 
@@ -635,8 +661,22 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
   // work pipeline ticking down between events. list() is an in-memory read on the
   // backend, so a steady 2s poll is cheap. Initial call loads sessions on mount.
   useEffect(() => {
-    refreshSessions();
-    const t = setInterval(refreshSessions, 2000);
+    void refreshSessions();
+    // Guarded for the same reason the per-session poll is: setInterval fires
+    // on schedule whether or not the previous refresh returned, so a server
+    // slower than the interval accumulates one more outstanding request every
+    // tick. This loop and the per-session polls together were what exhausted
+    // the browser's connection budget and froze the page.
+    let inFlight = false;
+    const t = setInterval(async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await refreshSessions();
+      } finally {
+        inFlight = false;
+      }
+    }, 2000);
     return () => clearInterval(t);
   }, []);
 

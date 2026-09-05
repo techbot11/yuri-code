@@ -1,6 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { MAX_UNANSWERED_POLLS, nextUnanswered, pollVerdict } from "./polling.ts";
+import { MAX_UNANSWERED_POLLS, POLL_INTERVAL_MS, POLL_TIMEOUT_MS,
+         nextUnanswered, pollVerdict } from "./polling.ts";
 
 const ok = (status: string) => ({ ok: true, result: { status } });
 const soft = (error: string) => ({ ok: false, error });
@@ -69,4 +70,15 @@ test("a working session can be polled indefinitely without tripping the bound", 
     n = nextUnanswered(ok("working"), n);
   }
   assert.equal(n, 0);
+});
+
+test("a poll may take longer than the interval, but not unboundedly", () => {
+  // The two numbers are a pair. A timeout at or below the interval would abort
+  // healthy polls the moment the server is merely slow; no timeout at all is
+  // what let requests pile up until the browser ran out of connections.
+  assert.ok(POLL_TIMEOUT_MS > POLL_INTERVAL_MS,
+    "a timeout under the interval would abort polls that are only slow");
+  assert.ok(POLL_TIMEOUT_MS < 800_000,
+    "a heartbeat must not inherit /api/tools/execute's 800s ceiling, which is " +
+    "for turns that genuinely run for minutes");
 });

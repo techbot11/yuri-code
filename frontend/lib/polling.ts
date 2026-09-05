@@ -18,6 +18,24 @@
  *  that a dead session stops being asked about. */
 export const MAX_UNANSWERED_POLLS = 8;
 
+/** How often a session is polled, and how long one poll may take.
+ *
+ *  The loop used to be a bare `setInterval`, which fires on schedule whether
+ *  or not the previous poll returned. When the server slowed past the
+ *  interval -- a Next dev-mode recompile is enough -- every session
+ *  accumulated one more outstanding request every tick, forever. Three
+ *  sessions produced seventeen pending requests, which exhausts the browser's
+ *  six-connection-per-origin budget and starves the whole app, page loads
+ *  included.
+ *
+ *  Two things stop that: one poll per session in flight at a time, and a
+ *  bound on how long a poll may hold a connection. `/api/tools/execute`
+ *  allows 800s for turns that legitimately run for minutes, which is the
+ *  right ceiling for a real tool call and catastrophic for a heartbeat.
+ */
+export const POLL_INTERVAL_MS = 1500;
+export const POLL_TIMEOUT_MS = 10_000;
+
 /** The raw shape /api/tools/execute returns. `result` is absent on a soft
  *  error, which is exactly the case the old code could not see. */
 export type ToolEnvelope = {
