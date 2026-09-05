@@ -27,7 +27,20 @@ export type BootRow = {
   key: "env" | "frontend" | "backend";
   label: string;
   state: ChildState;
-  /** Elapsed seconds, on the one row still working. "" on every other row. */
+  /** The row's own trailing detail, or "".
+   *
+   *  Two things can want this column, and they never want it on the same row
+   *  at the same time — but the precedence is stated rather than left to
+   *  that coincidence, because a row that DID want both would otherwise pick
+   *  one at random:
+   *
+   *  1. The elapsed-seconds counter, on the first still-starting row. Wins,
+   *     when it can collide. Its job is to say "not frozen", which is about
+   *     right now; a detail is about a step that has already finished.
+   *  2. The env row's `envDetail` — which of the two ways the environment
+   *     was resolved. Only the env row has one, and only once the probe has
+   *     settled (`pushBoot` sends "" while it is still "starting"), so in
+   *     practice case 1 never fires on the row that has a detail. */
   note: string;
 };
 
@@ -62,17 +75,32 @@ export function bootRows(
     // and is gone reads as a glitch, not as a measurement.
     const wants = state === "starting" && !noted && elapsedMs >= 1000;
     if (wants) noted = true;
-    return { key, label, state, note: wants ? `${Math.floor(elapsedMs / 1000)}s` : "" };
+    // See BootRow.note for why the counter wins a collision.
+    const note = wants ? `${Math.floor(elapsedMs / 1000)}s`
+               : key === "env" ? s.envDetail
+               : "";
+    return { key, label, state, note };
   });
 }
 
 /** The one detail worth printing under a failed boot.
  *
- *  A failed environment capture has no other home — `envDetail` is not
- *  rendered anywhere else, so before this it was collected and silently
- *  dropped. It wins over `errorDetail` because it comes first causally: if
- *  resolving the shell environment failed, whatever the backend then said
- *  about a missing key is a symptom of it. */
+ *  The `env === "failed"` branch is DEFENSIVE, not a live path: probeLoginEnv
+ *  never fails outright — it resolves null and the shell falls back to known
+ *  locations — so pushBoot only ever sends "starting" or "ready" for the env
+ *  row (desktop/main/index.ts). It stays because the type permits "failed"
+ *  and a future probe that can fail should not need to remember this file.
+ *
+ *  Which means `envDetail` is NOT rendered here in any real boot, and a
+ *  comment claiming this branch was where it finally got shown was wrong.
+ *  Its actual home is the env row's own note — see bootRows() — where it is
+ *  visible on every boot, which is the point: "using known locations" means
+ *  the login-shell probe failed and a shell-exported model, gateway or PATH
+ *  entry did not reach the agents.
+ *
+ *  When the branch does fire, it wins over `errorDetail` because it comes
+ *  first causally: if resolving the shell environment failed, whatever the
+ *  backend then said about a missing key is a symptom of it. */
 export function bootDetail(s: YuriBootState | null | undefined): string {
   if (!s) return "";
   if (s.env === "failed" && s.envDetail) return s.envDetail;

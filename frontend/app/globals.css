@@ -4863,7 +4863,12 @@ a.setup-fix:hover {
    to   { transform: translateX(363%); }
 }
 
-/* The checklist. Three fixed rows, so it never reflows as states land. */
+/* The checklist. Three fixed rows: the states landing never add or remove
+   one. The trailing note column does change width once — the Environment
+   row's note says which way the shell environment was resolved, and it
+   arrives with that row's "ready" — but that happens before the window is
+   ever shown (the probe finishes long before `next start` answers), so it is
+   not a reflow anyone watches. */
 .boot-rows {
    list-style: none;
    flex-shrink: 0;

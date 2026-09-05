@@ -52,11 +52,48 @@ test("sub-second elapsed shows no counter", () => {
   assert.equal(bootRows(state(), 1000).find((r) => r.key === "backend")?.note, "1s");
 });
 
-test("a failed environment reports its own detail, which has no other home", () => {
+test("the env row carries envDetail as its note, so the two cases look different", () => {
+  // The whole point: the row goes green either way, but "using known
+  // locations" means the login-shell probe FAILED and fell back — so a
+  // model, gateway or PATH entry exported in the user's shell did not reach
+  // the agents. Identical-looking rows hid exactly that.
+  const shell = bootRows(state({ envDetail: "from your shell", backend: "ready" }), 0);
+  const fallback = bootRows(state({ envDetail: "using known locations", backend: "ready" }), 0);
+  assert.equal(shell.find((r) => r.key === "env")?.note, "from your shell");
+  assert.equal(fallback.find((r) => r.key === "env")?.note, "using known locations");
+  assert.notEqual(shell.find((r) => r.key === "env")?.note,
+                  fallback.find((r) => r.key === "env")?.note);
+});
+
+test("only the env row gets envDetail — it is not a general note channel", () => {
+  const rows = bootRows(state({ envDetail: "from your shell", backend: "ready" }), 0);
+  assert.deepEqual(rows.map((r) => r.note), ["from your shell", "", ""]);
+});
+
+test("no envDetail yet means no note, not an empty gap with a stale value", () => {
+  assert.equal(bootRows(state({ envDetail: "", backend: "ready" }), 0)
+                 .find((r) => r.key === "env")?.note, "");
+});
+
+test("the elapsed counter beats envDetail on a row that could have both", () => {
+  // Stated precedence, not an accident of ordering: "not frozen" is about
+  // right now, a detail is about a step already finished. pushBoot never
+  // actually sends a detail for a still-starting env, so this is the rule
+  // for a case that should not arise rather than one that does.
+  const rows = bootRows(state({ env: "starting", envDetail: "from your shell" }), 4000);
+  assert.equal(rows.find((r) => r.key === "env")?.note, "4s");
+  assert.equal(rows.find((r) => r.key === "backend")?.note, "",
+    "and it is still only ONE counter");
+});
+
+test("a failed environment's detail outranks the boot error", () => {
+  // Defensive: probeLoginEnv never fails outright, so nothing sends
+  // env: "failed" today (see bootDetail). The precedence is what is pinned —
+  // the env failure comes first causally, and the backend's complaint about
+  // a missing key would be its symptom.
   assert.equal(
     bootDetail(state({ env: "failed", envDetail: "login shell exited 127", errorDetail: "no key" })),
-    "login shell exited 127",
-    "the env failure comes first causally; the backend's complaint is its symptom");
+    "login shell exited 127");
 });
 
 test("otherwise the boot error is the detail", () => {
