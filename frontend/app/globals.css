@@ -2654,7 +2654,12 @@ details.handoff:hover>summary {
    The fade overlay is .dthread-wrap::before/::after, below. */
 .dthread-wrap {
    flex: 1 1 auto;
-   min-height: 90px;
+   /* The reading window, not just a hint of one. At 90px this held about two
+      exchanges before scrolling, which is too little to follow a conversation
+      or find something said a minute ago. Viewport-relative so a short laptop
+      screen does not end up with a dock taller than the space above it: 34vh
+      is ~360px at 1080 and ~240px at 700. */
+   min-height: min(360px, 34vh);
    display: flex;
    flex-direction: column;
    position: relative;
@@ -2843,6 +2848,13 @@ details.handoff:hover>summary {
       width: auto;
       margin: 0 14px 14px;
       max-height: none;
+   }
+
+   /* The dock is static here and the page scrolls, so the thread does not
+      need to reserve a tall window of its own -- it would only push the
+      composer further down. */
+   .dthread-wrap {
+      min-height: 220px;
    }
 }
 
