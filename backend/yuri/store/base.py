@@ -224,6 +224,10 @@ class MemoryRepo(ABC):
     def by_body(self, body: str) -> Memory | None:
         """An exact CURRENT duplicate, for the dedup no-op (spec §5.4)."""
     @abstractmethod
+    def all_rows(self, limit: int = 400) -> list[Memory]:
+        """Every memory, retired ones included — the panel's history view and
+        the only route back from a wrong replacement."""
+    @abstractmethod
     def count(self) -> int:
         """How many current memories exist."""
 

@@ -86,7 +86,7 @@ export function groupByKind(rows: Memory[]): [string, Memory[]][] {
 
 /** A control that would fail is not rendered (GUIDE.md §6). */
 export function rowActions(m: Memory): {
-  pin: boolean; unpin: boolean; supersede: boolean; remove: boolean;
+  pin: boolean; unpin: boolean; supersede: boolean; restore: boolean; remove: boolean;
 } {
   const superseded = Boolean(m.superseded_by);
   return {
@@ -95,6 +95,10 @@ export function rowActions(m: Memory): {
     pin: !m.pinned && !superseded && m.kind !== "preference",
     unpin: m.pinned && !superseded,
     supersede: !superseded,
+    // The way out of a wrong replacement. Retiring the wrong memory is a
+    // mistake the loose supersede matcher makes possible, and without this it
+    // was permanent from the UI.
+    restore: superseded,
     remove: true,
   };
 }

@@ -199,3 +199,66 @@ class MemoryApi(unittest.TestCase):
         self.assertEqual(
             self.client.post("/yuri/memories/search",
                              json={"query": "x", "project": "/etc"}).status_code, 400)
+
+
+class RestoringTests(MemoryApi):
+    """Undoing a replacement.
+
+    Retiring the wrong memory is a mistake the loose supersede matcher makes
+    possible — "old rule" can resolve to "the current rule" on one shared
+    word — and before this it was permanent from the UI. Found by having to
+    revert one by hand with SQL.
+    """
+
+    def _retire(self):
+        old = self._add("Always English or Gujarati", kind="preference")
+        r = self.client.post(f"/yuri/memories/{old['id']}/supersede",
+                             json={"body": "Always Gujarati only"})
+        return old, r.json()["by"]
+
+    def test_a_retired_memory_is_invisible_by_default(self):
+        old, _ = self._retire()
+        ids = [m["id"] for m in self.client.get("/yuri/memories").json()["memories"]]
+        self.assertNotIn(old["id"], ids)
+
+    def test_include_superseded_actually_includes_them(self):
+        # The parameter existed and did nothing, which is what made a wrong
+        # replacement permanent.
+        old, _ = self._retire()
+        ids = [m["id"] for m in
+               self.client.get("/yuri/memories?include_superseded=true").json()["memories"]]
+        self.assertIn(old["id"], ids)
+
+    def test_restore_brings_it_back(self):
+        old, _ = self._retire()
+        r = self.client.post(f"/yuri/memories/{old['id']}/restore")
+        self.assertEqual(r.status_code, 200, r.text)
+        bodies = [m["body"] for m in self.client.get("/yuri/memories").json()["memories"]]
+        self.assertIn("Always English or Gujarati", bodies)
+
+    def test_restore_says_the_replacement_is_still_there(self):
+        # It clears superseded_by and NOTHING else, so both are now current.
+        # Silently retiring the replacement would undo something the caller
+        # never mentioned — so it reports instead.
+        old, _ = self._retire()
+        out = self.client.post(f"/yuri/memories/{old['id']}/restore").json()
+        self.assertEqual(out["replaced_by"], "Always Gujarati only")
+        self.assertTrue(out["replacement_still_current"])
+        bodies = [m["body"] for m in self.client.get("/yuri/memories").json()["memories"]]
+        self.assertIn("Always Gujarati only", bodies)
+
+    def test_restoring_something_not_retired_is_a_400(self):
+        made = self._add("just a memory")
+        r = self.client.post(f"/yuri/memories/{made['id']}/restore")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("not retired", r.json()["detail"])
+
+    def test_restoring_an_unknown_memory_is_a_404(self):
+        self.assertEqual(self.client.post("/yuri/memories/nope/restore").status_code, 404)
+
+    def test_a_restored_memory_reaches_her_prompt_again(self):
+        old, _ = self._retire()
+        self.client.post(f"/yuri/memories/{old['id']}/restore")
+        row = next(m for m in self.client.get("/yuri/memories").json()["memories"]
+                   if m["id"] == old["id"])
+        self.assertTrue(row["in_prompt"])

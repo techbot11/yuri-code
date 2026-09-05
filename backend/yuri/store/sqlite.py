@@ -469,6 +469,9 @@ class SqliteMemories(_Base, MemoryRepo):
         return self._one("SELECT * FROM memories WHERE body = ? AND superseded_by IS NULL "
                          "LIMIT 1", (" ".join(str(body or "").split()),))
 
+    def all_rows(self, limit=400):
+        return self._many("SELECT * FROM memories ORDER BY created_at DESC LIMIT ?", (limit,))
+
     def count(self):
         return self._c.get().execute(
             "SELECT COUNT(*) FROM memories WHERE superseded_by IS NULL").fetchone()[0]

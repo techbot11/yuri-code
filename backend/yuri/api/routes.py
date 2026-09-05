@@ -545,7 +545,11 @@ def build_router(require_auth: Callable) -> APIRouter:
         something you can see and fix by pinning.
         """
         c = container()
-        rows = c.memories.current(limit=400)
+        # `include_superseded` was declared and then ignored, which made
+        # retired memories unreachable from the panel — and therefore made a
+        # wrong replacement permanent. Found while reverting one by hand.
+        rows = (c.memories.all_rows(limit=400) if include_superseded
+                else c.memories.current(limit=400))
         report = c.memories.budget_report(_active_slugs())
         in_prompt = set(report["in_prompt"])
         out = [{**m.to_dict(), "in_prompt": m.id in in_prompt,
@@ -633,6 +637,23 @@ def build_router(require_auth: Callable) -> APIRouter:
             raise HTTPException(400, "a memory cannot supersede itself")
         c.memories.supersede(victim, replacement)
         return {"superseded": victim.id, "by": replacement.id}
+
+    @r.post("/memories/{memory_id}/restore")
+    async def restore_memory(memory_id: str):
+        """Bring a retired memory back.
+
+        The way out of a wrong replacement, which the loose supersede matcher
+        makes possible: "old rule" can resolve to "the current rule" on one
+        shared word. Without this, retiring the wrong memory was permanent
+        from the UI.
+        """
+        c = container()
+        try:
+            return c.memories.restore(memory_id)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @r.get("/memories/{memory_id}/history")
     async def memory_history(memory_id: str):

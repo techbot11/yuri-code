@@ -31,17 +31,19 @@ export default function Page() {
   const [form, setForm] = useState<MemoryForm>(EMPTY_MEMORY);
   const [replacing, setReplacing] = useState("");
   const [replacement, setReplacement] = useState("");
+  const [showRetired, setShowRetired] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const data = await yget<Payload>("memories");
+      const data = await yget<Payload>(
+        `memories${showRetired ? "?include_superseded=true" : ""}`);
       setRows(data.memories || []);
       setBudget(data.budget || null);
       setLoadError(null);
     } catch (e) {
       setLoadError(e);
     }
-  }, []);
+  }, [showRetired]);
 
   useEffect(() => {
     void load();
@@ -93,9 +95,17 @@ export default function Page() {
           What Yuri remembers about you. Everything here is yours to change or delete — and the
           line under each one says whether it reaches her.
         </p>
-        {!adding && rows && (
-          <button className="txtoggle" onClick={() => setAdding(true)}>Add a memory</button>
-        )}
+        <div className="mcp-actions">
+          {/* Retired memories are hidden by default — they are history, not
+              what she knows. But they must be REACHABLE, because bringing one
+              back is the only way out of a wrong replacement. */}
+          <button className="txtoggle" onClick={() => setShowRetired((v) => !v)}>
+            {showRetired ? "Hide retired" : "Show retired"}
+          </button>
+          {!adding && rows && (
+            <button className="txtoggle" onClick={() => setAdding(true)}>Add a memory</button>
+          )}
+        </div>
       </div>
 
       {/* The budget report: the "nothing is dropped silently" rule made into
@@ -221,6 +231,13 @@ export default function Page() {
                                   onClick={() => void act(m.id, () =>
                                     yput(`memories/${m.id}`, { pinned: false }))}>
                             Stop always including
+                          </button>
+                        )}
+                        {actions.restore && (
+                          <button className="txtoggle" disabled={busy === m.id}
+                                  onClick={() => void act(m.id, () =>
+                                    ypost(`memories/${m.id}/restore`))}>
+                            Bring it back
                           </button>
                         )}
                         {actions.supersede && (

@@ -373,6 +373,17 @@ class Recollection:
             raise KeyError(f"no memory {id!r}")
         return m
 
+    def all_rows(self, limit: int = 400) -> list[Memory]:
+        """Every memory, retired ones included. The panel's history view, and
+        the only route back from a wrong replacement."""
+        return self.repo.all_rows(limit=limit)
+
+    def retired(self, limit: int = 200) -> list[Memory]:
+        """Memories that have been replaced. Kept, never deleted — "you used
+        to want X" is occasionally the answer, and it is also the only way to
+        undo a wrong replacement."""
+        return [m for m in self.repo.all_rows(limit=limit) if m.superseded_by]
+
     def history(self, id: str) -> list[Memory]:
         """What this memory replaced. Superseded rows are kept, not deleted —
         "you used to want X" is occasionally the answer."""
@@ -421,6 +432,30 @@ class Recollection:
         m.updated_at = utcnow()
         self.repo.update(m)
         return m
+
+    def restore(self, id: str) -> dict:
+        """Un-retire a memory.
+
+        Clears `superseded_by` and NOTHING else — deliberately. The obvious
+        alternative is to swap them, retiring whatever replaced it, but the
+        two reasons to restore want opposite things: if the supersede matcher
+        picked the WRONG memory you want the old one back while the new one
+        stays valid, and if you simply changed your mind you want the swap.
+        Guessing which would silently retire something the caller never
+        mentioned, so this does the smaller, predictable half and reports
+        whether the replacement is still current — the panel says so, and
+        retiring it is one more click.
+        """
+        m = self.get(id)
+        if not m.superseded_by:
+            raise ValueError("that memory is not retired, so there is nothing to bring back")
+        replacement = self.repo.get(m.superseded_by)
+        m.superseded_by = None
+        m.updated_at = utcnow()
+        self.repo.update(m)
+        return {"restored": m.id, "body": m.body,
+                "replaced_by": replacement.body if replacement else None,
+                "replacement_still_current": bool(replacement and replacement.is_current)}
 
     def delete(self, id: str) -> None:
         """A hard delete, and the ONLY one. No voice tool reaches this: losing

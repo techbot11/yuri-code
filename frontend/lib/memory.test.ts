@@ -68,9 +68,17 @@ test("a pinned row offers Unpin and not Pin", () => {
   assert.equal(a.unpin, true);
 });
 
-test("a superseded row offers no pin and no supersede, but can be deleted", () => {
+test("a superseded row offers Bring back, and nothing that assumes it is live", () => {
+  // Restore is the way out of a wrong replacement — the loose supersede
+  // matcher can retire the wrong memory, and without this it was permanent.
   const a = rowActions(mem({ superseded_by: "x" }));
-  assert.deepEqual(a, { pin: false, unpin: false, supersede: false, remove: true });
+  assert.deepEqual(a, { pin: false, unpin: false, supersede: false,
+                        restore: true, remove: true });
+});
+
+test("a live row is never offered Bring back", () => {
+  assert.equal(rowActions(mem()).restore, false);
+  assert.equal(rowActions(mem({ pinned: true })).restore, false);
 });
 
 test("the budget summary warns only when something is being left out", () => {
