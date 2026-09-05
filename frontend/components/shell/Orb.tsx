@@ -75,6 +75,13 @@ export function Orb({ engaged }: { engaged: boolean }) {
       if (!s.engaged) {
         const home = target(w, h, false);
         cv.parentElement?.style.setProperty("--orb-x", `${Math.round(home.x)}px`);
+        // Her lower edge, for the same reason as --orb-x: the boot splash
+        // stacks a variable amount under her (a line, then a checklist, then
+        // Retry and Quit when it fails) and has to start BELOW her whatever
+        // that adds up to. Anchoring that block to the window bottom instead
+        // put the wordmark inside the orb the moment the buttons appeared.
+        cv.parentElement?.style.setProperty(
+          "--orb-bottom", `${Math.round(home.y + home.r)}px`);
       }
 
       const st = orbState(s.vstate, s.sessions, s.approvals.length);

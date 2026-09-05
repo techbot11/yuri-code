@@ -28,22 +28,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { yget } from "@/lib/api";
 import { gateOpen, type DoctorCheck } from "@/lib/setup";
-import { retryDelayMs, shouldGiveUp, waitMessage, waitPhase } from "@/lib/backendWait";
+import { retryDelayMs, shouldGiveUp, waitPhase } from "@/lib/backendWait";
+import { type YuriBootState } from "@/lib/bootRows.ts";
+import { BootSplash } from "./BootSplash";
 import { SetupPanel } from "./SetupPanel";
 
-/** Pushed by the desktop shell's main process over the boot:state channel
- *  (desktop/main/index.ts's pushBoot) — present only inside Electron.
- *  Informational only: whether the backend is reachable is always decided
- *  by actually reaching it over HTTP below, never by trusting this alone. */
-type YuriBootState = {
-  phase: "starting" | "ready" | "failed";
-  env: string;
-  envDetail: string;
-  backend: string;
-  frontend: string;
-  errorDetail: string;
-};
-
+/** YuriBootState (lib/bootRows.ts) is pushed by the desktop shell's main
+ *  process over the boot:state channel — see desktop/main/index.ts's
+ *  pushBoot. Informational only: whether the backend is reachable is always
+ *  decided by actually reaching it over HTTP below, never by trusting this
+ *  alone. */
 type YuriBootBridge = {
   onState: (cb: (s: YuriBootState) => void) => void;
   retry: () => void;
@@ -104,44 +98,28 @@ export function SetupGate({ children }: { children: React.ReactNode }) {
   if (dismissed) return <>{children}</>;
   if (pathname === "/setup") return <>{children}</>;
 
+  // Both waiting states are the same moment to the person watching — the app
+  // is not up yet — so both get the splash, and neither gets a panel. The
+  // bridge decides whether Retry and Quit exist at all: they need the desktop
+  // shell's IPC, so a plain browser tab gets the splash with no buttons
+  // rather than two dead ones (GUIDE.md §6).
   if (wait) {
-    const phase = waitPhase(wait.attempt, wait.elapsedMs);
     const bridge = yuriBoot();
     return (
-      <div className="setup-gate">
-        <div className="setup-view">
-          <h2 className="viewtitle">Starting Yuri</h2>
-          <div className="mcp-blurb">{waitMessage(phase)}</div>
-          {phase === "failed" && boot?.errorDetail ? (
-            <pre className="mcp-err">{boot.errorDetail}</pre>
-          ) : null}
-          {/* A control that cannot work is not rendered (GUIDE.md §6): Retry
-              and Quit both need the desktop shell's IPC bridge, so a plain
-              browser tab gets the wait with no buttons at all. */}
-          {phase === "failed" && bridge ? (
-            <div className="mcp-actions">
-              <button className="txtoggle primary" onClick={() => bridge.retry()}>
-                Try again
-              </button>
-              <button className="txtoggle" onClick={() => bridge.quit()}>Quit</button>
-            </div>
-          ) : null}
-        </div>
-      </div>
+      <BootSplash
+        phase={waitPhase(wait.attempt, wait.elapsedMs)}
+        boot={boot}
+        startedAtMs={startedAt.current}
+        onRetry={bridge && (() => bridge.retry())}
+        onQuit={bridge && (() => bridge.quit())}
+      />
     );
   }
 
+  // Before the very first check resolves. No wait has been measured yet, so
+  // there is nothing to count.
   if (checks === null) {
-    return (
-      <div className="setup-gate">
-        <div className="setup-view">
-          <h2 className="viewtitle">Checking your machine</h2>
-          <div className="empty">
-            Running the same checks as <code>yuri doctor</code>…
-          </div>
-        </div>
-      </div>
-    );
+    return <BootSplash phase="checking" boot={boot} startedAtMs={null} />;
   }
   if (gateOpen(checks)) return <>{children}</>;
 

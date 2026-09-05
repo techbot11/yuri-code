@@ -4761,3 +4761,193 @@ a.setup-fix:hover {
    max-width: 46ch;
    line-height: 1.4;
 }
+
+/* ---- boot splash ----
+   Stands in for the STAGE while Yuri's backend comes up, so it takes the
+   stage's own shape (relative, clipped, no padding) rather than .setup-gate's
+   padded scroller — the orb canvas is absolutely positioned and needs a
+   positioned, unpadded box to fill.
+
+   Deliberately NOT a .setup-view panel. A panel is for content you read or
+   fill in; a boot is a moment you watch, and the panel version read as a
+   dialog box that had lost its app. The layout mirrors .naming (the app's own
+   idle state): her orb, her wordmark under it, a line under that. Same
+   --orb-x trick, so the text block centres on wherever she actually settled
+   rather than on the window. */
+.boot {
+   /* FIXED, over everything (highest z-index elsewhere in this file is 50).
+      The splash owns the whole window rather than sitting in the stage's
+      cell, because the rail is rendered ABOVE the gate in layout.tsx and so
+      cannot be hidden from in here — and during a boot every one of its
+      destinations leads into an app that is not up yet. Eleven live-looking
+      controls that all do nothing is the same rule as the Retry button
+      (GUIDE.md §6), applied to navigation.
+
+      It also makes the composition better: the orb centres on the window
+      instead of on the stage's off-centre cell. */
+   position: fixed;
+   inset: 0;
+   z-index: 90;
+   overflow: hidden;
+   background: var(--bg);
+}
+
+.boot-mid {
+   position: absolute;
+   left: 0;
+   /* Centres on the orb, not on the viewport: Orb publishes its home x onto
+      its parent, and 0..2x is the box whose middle is x. */
+   width: calc(var(--orb-x, 45%) * 2);
+   /* Starts below her and grows DOWNWARD. Anchored to the window bottom
+      instead, the stack grew upward and the wordmark ended up inside the orb
+      as soon as a failure added two buttons. `bottom` bounds the box rather
+      than positioning it, so an unusually long error scrolls in place
+      instead of running off the screen. */
+   top: calc(var(--orb-bottom, 73vh) + 22px);
+   bottom: 18px;
+   z-index: 4;
+   display: flex;
+   flex-direction: column;
+   justify-content: flex-start;
+   align-items: center;
+   gap: 13px;
+   overflow-y: auto;
+   text-align: center;
+}
+
+/* Same treatment as .sname — this IS that wordmark, at the one moment the
+   app it names is not up yet. */
+.boot-name {
+   font-family: var(--disp);
+   font-size: 15px;
+   letter-spacing: .42em;
+   text-indent: .42em;
+   color: var(--ink);
+   opacity: .92;
+}
+
+.boot-line {
+   font-family: var(--mono);
+   font-size: 11px;
+   letter-spacing: .04em;
+   color: var(--mut);
+}
+
+/* An indeterminate sweep, not a percentage: nothing here knows how far along
+   a cold start is, and a bar that claims 60% would be inventing it. Its job
+   is only to say the screen is not frozen. */
+.boot-sweep {
+   position: relative;
+   width: 168px;
+   height: 2px;
+   /* A 2px box has no min-content height to defend itself with, so in a
+      column that overflows even slightly flex shrinks it to ZERO and the bar
+      silently disappears -- measured at exactly that, h:0, in the failed
+      state before the stack was made to fit. */
+   flex-shrink: 0;
+   overflow: hidden;
+   background: var(--line2);
+}
+
+.boot-sweep::after {
+   content: "";
+   position: absolute;
+   inset: 0 auto 0 0;
+   width: 38%;
+   background: linear-gradient(90deg, transparent, var(--acc), transparent);
+   animation: boot-sweep 1.9s ease-in-out infinite;
+}
+
+@keyframes boot-sweep {
+   from { transform: translateX(-100%); }
+   to   { transform: translateX(363%); }
+}
+
+/* The checklist. Three fixed rows, so it never reflows as states land. */
+.boot-rows {
+   list-style: none;
+   flex-shrink: 0;
+   margin: 0;
+   padding: 0;
+   display: flex;
+   flex-direction: column;
+   gap: 7px;
+   min-width: 196px;
+   font-family: var(--mono);
+   font-size: 10.5px;
+   letter-spacing: .03em;
+   text-align: left;
+}
+
+.boot-rows li {
+   display: grid;
+   grid-template-columns: 11px 1fr auto;
+   align-items: center;
+   gap: 9px;
+}
+
+.boot-mark {
+   width: 5px;
+   height: 5px;
+   margin-left: 3px;
+   border-radius: 50%;
+   background: var(--dim);
+}
+
+/* Done recedes and live steps forward: the row you should be looking at is
+   the only one at full ink. */
+.boot-rows li[data-state="ready"] .boot-mark { background: var(--good); }
+.boot-rows li[data-state="ready"] .boot-rlabel { color: var(--dim); }
+
+.boot-rows li[data-state="starting"] .boot-mark {
+   background: var(--acc);
+   animation: boot-pulse 1.4s ease-in-out infinite;
+}
+.boot-rows li[data-state="starting"] .boot-rlabel { color: var(--ink); }
+
+.boot-rows li[data-state="failed"] .boot-mark { background: var(--danger); }
+.boot-rows li[data-state="failed"] .boot-rlabel { color: var(--danger); }
+
+@keyframes boot-pulse {
+   0%, 100% { opacity: .3; }
+   50%      { opacity: 1; }
+}
+
+.boot-rnote {
+   color: var(--dim);
+   /* Digits in a column that must not jitter as the seconds tick. */
+   font-variant-numeric: tabular-nums;
+}
+
+.boot-err {
+   margin: 4px 0 0;
+   max-width: 46ch;
+   max-height: 132px;
+   overflow: auto;
+   padding: 9px 11px;
+   border: 1px solid var(--line2);
+   background: var(--panel);
+   color: var(--mut);
+   font-family: var(--mono);
+   font-size: 10.5px;
+   line-height: 1.5;
+   text-align: left;
+   white-space: pre-wrap;
+}
+
+.boot-actions {
+   display: flex;
+   gap: 8px;
+   margin-top: 4px;
+}
+
+/* Someone who has asked for less motion still needs to know it is working,
+   so the sweep becomes a static segment rather than disappearing. */
+@media (prefers-reduced-motion: reduce) {
+   .boot-sweep::after {
+      animation: none;
+      width: 46%;
+      transform: translateX(58%);
+   }
+   .boot-rows li[data-state="starting"] .boot-mark { animation: none; }
+}

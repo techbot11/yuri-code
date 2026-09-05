@@ -58,11 +58,14 @@ export function waitPhase(attempt: number, elapsedMs: number): WaitPhase {
 }
 
 /** The line to show for each phase, in plain words — the reader does not
- *  know what a health check or a poll is. */
+ *  know what a health check or a poll is.
+ *
+ *  Short, because the line is no longer carrying the whole splash on its
+ *  own: the checklist beside it names what is still going and how long it
+ *  has been going for (lib/bootRows.ts), so this does not have to hedge
+ *  about cold starts taking a while. */
 export function waitMessage(phase: WaitPhase): string {
-  if (phase === "checking") return "Looking for Yuri's backend…";
-  if (phase === "waiting") {
-    return "Still starting up — this can take a little while on a cold start.";
-  }
+  if (phase === "checking") return "Waking her up…";
+  if (phase === "waiting") return "Warming up her backend.";
   return "Yuri's backend did not start.";
 }
