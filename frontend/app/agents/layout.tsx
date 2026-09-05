@@ -12,20 +12,20 @@
 // there is no `currentTab` to fall out of step with what is on screen.
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { TABS, activeTab, showsTabs } from "@/lib/agentsTabs";
+import { AGENTS, activeTab, showsTabs } from "@/lib/panelTabs";
 
 export default function AgentsLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   // A form gets the whole panel and a back link. Tabs above a half-filled
   // form invite a click that silently discards what you typed.
-  if (!showsTabs(pathname)) return <>{children}</>;
+  if (!showsTabs(AGENTS, pathname)) return <>{children}</>;
 
-  const active = activeTab(pathname);
+  const active = activeTab(AGENTS, pathname);
   return (
     <div className="agents-view">
       <h2 className="viewtitle">Agents</h2>
       <nav className="tabs" aria-label="Agents sections">
-        {TABS.map((t) => (
+        {AGENTS.tabs.map((t) => (
           <Link key={t.href} href={t.href}
                 className={`tab ${t.href === active ? "on" : ""}`}
                 aria-current={t.href === active ? "page" : undefined}>

@@ -4296,29 +4296,19 @@ a.miss-row {
 .wf-step.tk-blocked { border-left-color: var(--danger); }
 .wf-step.tk-cancelled { border-left-color: var(--dim); }
 
-/* --- plan shapes (workflow templates), in the Missions panel -------------- */
+/* --- plan shapes (workflow templates): the Missions panel's second tab ----
+   Was a collapsed section stacked under the missions list, which is why it
+   used to carry a top border and a disclosure toggle. As a tab it needs
+   neither -- the tab bar is the separator. */
 .tpl {
-   margin-top: 26px;
-   padding-top: 22px;
-   border-top: 1px solid var(--line);
    min-width: 0;
 }
 
-/* The heading is the disclosure control, so there is one thing to click
-   rather than a heading beside a chevron that does the same job. */
-.tpl-toggle {
-   font: inherit;
-   color: inherit;
-   letter-spacing: inherit;
-   text-transform: inherit;
-   background: none;
-   border: 0;
-   padding: 0;
-   cursor: pointer;
-}
-
-.tpl-toggle:hover {
-   color: var(--ink);
+/* The missions list and the template editor: siblings of .tpl under the
+   Missions tab bar, which owns the panel's padding and title. */
+.miss-list,
+.tpl-edit {
+   min-width: 0;
 }
 
 .tpl-list {

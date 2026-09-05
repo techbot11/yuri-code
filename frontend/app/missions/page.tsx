@@ -7,12 +7,14 @@
 //
 // No create button: missions are created by starting a session (Phase 4
 // ruled out an orchestrator), so a create form here would imply a queue that
-// does not exist.
+// does not exist. The blurb says so, because a panel whose siblings all have
+// an action and this one does not reads as broken rather than deliberate.
+//
+// The panel title, wrapper and tab bar belong to app/missions/layout.tsx.
 import { useCallback, useEffect, useState, type MouseEvent } from "react";
 import { useRouter } from "next/navigation";
 import { useYuri } from "@/components/VoiceProvider";
 import { ViewError } from "@/components/ViewError";
-import { Templates } from "@/components/Templates";
 import { MISSION_CLASS, canCancel, canDelete, canPause, canResume } from "@/lib/missions";
 import { ydelete, yget, ypost, ApiError } from "@/lib/api";
 import type { Mission, ProjectRow } from "@/lib/yuriTypes";
@@ -112,8 +114,15 @@ export default function Page() {
   const sorted = missions.slice().sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
 
   return (
-    <div className="miss-view">
-      <h2 className="viewtitle">Missions</h2>
+    <section className="miss-list">
+      <div className="mcp-head">
+        <h3 className="sectitle">Your missions</h3>
+      </div>
+      <p className="mcp-blurb">
+        Work Yuri has under way. Missions are created by starting a session
+        rather than added here, so there is nothing to add — each one follows a
+        plan shape, which you can change under Plan shapes.
+      </p>
 
       {loadError ? (
         <ViewError error={loadError} onRetry={() => void load()} />
@@ -143,12 +152,7 @@ export default function Page() {
         </>
       )}
 
-      {/* The plan shapes a mission can be built from. Here rather than in the
-          rail: a template IS a mission's plan, and the rail holds at eight on
-          the rule that it stays in plain words. Collapsed, because the list
-          above is what someone opens this panel for. */}
-      <Templates />
-    </div>
+    </section>
   );
 }
 
