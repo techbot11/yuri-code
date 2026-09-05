@@ -89,3 +89,8 @@ class MemorySearch(BaseModel):
     query: str = ""
     project: str | None = None
     since: str | None = None
+
+
+class ConfigUpdate(BaseModel):
+    """Managed settings to write. An empty value clears the key."""
+    values: dict[str, str]

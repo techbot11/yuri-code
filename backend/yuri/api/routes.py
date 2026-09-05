@@ -13,12 +13,15 @@ from __future__ import annotations
 import asyncio
 import datetime
 import json
+import os
 from dataclasses import replace
 from typing import Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+import config
+from yuri import doctor, setup_store
 from yuri.app import container, last_spoke_at, narration_mode, set_narration_mode
 from yuri.domain.memory import InvalidMemory, Memory
 from yuri.domain.mission import InvalidTransition
@@ -32,8 +35,8 @@ from yuri.services.roster import DuplicateSpecialist, NoSpecialist, SpecialistIn
 from yuri.workflows.loader import (MAX_TASKS_PER_WORKFLOW, VERIFY_NAMES,
                                    TemplateError)
 from yuri.narration.policy import MODES
-from .schemas import (AssignBody, McpEnabled, McpServerBody, MemoryBody,
-                      MemorySearch, NarrationUpdate, ProjectCreate,
+from .schemas import (AssignBody, ConfigUpdate, McpEnabled, McpServerBody,
+                      MemoryBody, MemorySearch, NarrationUpdate, ProjectCreate,
                       SpecialistBody, SupersedeBody, WorkflowBody)
 
 ACTIVE = ("running", "waiting_for_approval", "paused", "queued")
@@ -341,6 +344,61 @@ def build_router(require_auth: Callable) -> APIRouter:
         return {"roles": [{"role": role, "prefers": ROLE_PREFERENCE.get(role),
                            "specialists": by_role.get(role, [])} for role in ROLES],
                 "capabilities": list(TASK_CAPABILITIES)}
+
+    @r.get("/doctor")
+    async def read_doctor():
+        """The same checks `yuri doctor` prints, as data — one implementation,
+        so the CLI and the Setup screen cannot disagree. `ok` counts only the
+        REQUIRED checks: a missing tmux costs the live terminal pane, not the
+        app."""
+        rows = await asyncio.to_thread(doctor.checks)
+        return {"checks": [{"name": c.name, "ok": c.ok, "detail": c.detail,
+                            "required": c.required} for c in rows],
+                "ok": all(c.ok for c in rows if c.required)}
+
+    @r.get("/config")
+    async def read_config():
+        """Managed settings: presence, a masked hint, provenance, and what a
+        change takes effect on. NEVER a value."""
+        return {"keys": config.managed_status(),
+                "path": setup_store.target_dir().replace(
+                    os.path.expanduser("~"), "~", 1)}
+
+    @r.put("/config")
+    async def write_config(body: ConfigUpdate):
+        """Write managed settings, to the file AND to this process.
+
+        Refuses any name not in MANAGED_KEYS: this endpoint writes a file the
+        backend reads at startup, so an arbitrary name would let a caller set
+        VC_AUTH_TOKEN or point ALLOWED_PROJECT_ROOTS anywhere."""
+        known = {k.name: k for k in config.MANAGED_KEYS}
+        unknown = sorted(set(body.values) - set(known))
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"not settings Yuri manages: {', '.join(unknown)}")
+        path = await asyncio.to_thread(setup_store.write, dict(body.values))
+        # Also update THIS process's environment. Both voice_keys_found() and
+        # allowed_project_roots() read os.getenv live, so a file write alone
+        # changes nothing until a restart -- every "takes effect straight
+        # away" label would be false, and the Setup screen's save-then-
+        # re-check could never see the key it just saved. Only after the write
+        # succeeds, so the file and the environment cannot diverge on failure.
+        for name, raw in body.values.items():
+            # Same cleaning `setup_store.write` just applied to the file, so
+            # the two can never disagree about what a raw value becomes.
+            clean = setup_store.clean_value(raw)
+            if clean:
+                os.environ[name] = clean
+            else:
+                os.environ.pop(name, None)
+            config.ENV_SOURCES[name] = "Setup"
+        written = sorted(body.values)
+        # De-duplicated, in the fixed order the UI explains them in.
+        order = ("now", "next-session", "restart")
+        effects = [e for e in order if any(known[n].effect == e for n in written)]
+        return {"written": written, "effects": effects,
+                "path": path.replace(os.path.expanduser("~"), "~", 1)}
 
     @r.get("/templates")
     async def list_templates():
