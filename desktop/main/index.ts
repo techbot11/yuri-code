@@ -4,7 +4,7 @@
 // notices -- which environment the children get, whether the boot is ready
 // or failed, which tray state a set of facts means -- lives in ../lib as a
 // pure function with tests, because there is no Electron test environment.
-import { app, BrowserWindow, globalShortcut, ipcMain, shell } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, shell, Tray } from "electron";
 import * as path from "node:path";
 import {
   applyBootEvent,
@@ -16,6 +16,7 @@ import {
 import { mergeEnv, withFallbackPath, type Env } from "../lib/env";
 import { isAppUrl } from "../lib/urls";
 import { portsFromEnv } from "../lib/ports";
+import { TRAY_STATES, trayLabel, type TrayState } from "../lib/tray";
 import { startServers, stopServers } from "./servers";
 import { homeDir, probeLoginEnv } from "./shellEnv";
 
@@ -180,7 +181,67 @@ export function showMainWindow(): void {
   mainWindow.focus();
 }
 
+let tray: Tray | null = null;
+let currentTrayState: TrayState = "asleep";
+// This Electron version's Tray has no getContextMenu() to read back what was
+// set, so the verification harness (no automated Electron test environment
+// exists) needs its own way to inspect the menu just built -- kept alongside
+// `tray` for the same reason.
+let lastTrayMenu: Menu | null = null;
+
+function iconFor(state: TrayState): Electron.NativeImage {
+  const img = nativeImage.createFromPath(
+    path.join(__dirname, `../assets/${state}Template@2x.png`));
+  // Marking it a template is what makes macOS tint it for the menu bar's
+  // light and dark appearance; an untinted icon is invisible in one of them.
+  img.setTemplateImage(true);
+  return img;
+}
+
+function refreshTray(): void {
+  if (!tray) return;
+  tray.setImage(iconFor(currentTrayState));
+  tray.setToolTip(`Yuri — ${trayLabel(currentTrayState)}`);
+  lastTrayMenu = Menu.buildFromTemplate([
+    { label: trayLabel(currentTrayState), enabled: false },
+    { type: "separator" },
+    { label: "Show Yuri", click: () => showMainWindow() },
+    // Just app.quit(). Setting `quitting` here would make before-quit's own
+    // re-entry guard skip the drain and orphan both children holding their
+    // ports -- measured, from the boot page's Quit button doing exactly that.
+    { label: "Quit Yuri", click: () => app.quit() },
+  ]);
+  tray.setContextMenu(lastTrayMenu);
+}
+
+function createTray(): void {
+  tray = new Tray(iconFor("asleep"));
+  // A left click shows her, which is what a tray icon should do; the menu is
+  // on right-click, per the platform.
+  tray.on("click", () => showMainWindow());
+  refreshTray();
+}
+
+// Exposed only for the verification harness -- there is no automated
+// Electron test environment, so lib/tray.ts carries the actual logic under
+// `node --test` and this just lets a driving script assert on the live Tray
+// and state without a real renderer to send tray:state over IPC.
+export function _trayForVerification(): Tray | null {
+  return tray;
+}
+export function _trayStateForVerification(): TrayState {
+  return currentTrayState;
+}
+export function _trayMenuForVerification(): Menu | null {
+  return lastTrayMenu;
+}
+
 app.whenReady().then(async () => {
+  // Before the boot window, not after: her presence in the menu bar should
+  // not wait on a successful boot, and a failed boot still leaves a tray
+  // behind to show something is wrong.
+  createTray();
+
   bootWindow = createBootWindow();
   // Wait for the page before pushing state, or the first push lands nowhere.
   await new Promise<void>((resolve) =>
@@ -208,6 +269,14 @@ app.whenReady().then(async () => {
     app.quit();
   });
 
+  ipcMain.on("tray:state", (_e, state: TrayState) => {
+    // Trust nothing from a renderer: an unknown string would blank the icon.
+    if (!TRAY_STATES.includes(state)) return;
+    if (state === currentTrayState) return;   // avoid rebuilding the menu on every poll
+    currentTrayState = state;
+    refreshTray();
+  });
+
   globalShortcut.register("CommandOrControl+Shift+Y", () => showMainWindow());
 });
 
@@ -223,10 +292,28 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   // finally, not then: a stopServers() that rejects must still exit rather
   // than leaving the app un-quittable.
-  void stopServers().finally(() => app.exit(0));
+  void stopServers().finally(() => {
+    // Was on "will-quit" (unregisterAll() there never ran: app.exit() below
+    // skips both before-quit and will-quit by design, and every real quit
+    // ends here, so that handler was confirmed-dead code). Doing it here
+    // means it actually executes, immediately before the exit it belongs
+    // next to -- not that skipping it was ever observable, since the OS
+    // reclaims a process-scoped hook on its own.
+    globalShortcut.unregisterAll();
+    app.exit(0);
+  });
 });
 
 // macOS: clicking the Dock icon after a hide must bring her back.
 app.on("activate", () => showMainWindow());
 
-app.on("will-quit", () => globalShortcut.unregisterAll());
+// Deliberately empty. Two reasons:
+//   - Without this, Electron's default is to quit once no windows remain.
+//     ⌘W on the BOOT window while startServers() is still running would fire
+//     that default and drain via before-quit before the children exist,
+//     while boot()'s in-flight startServers() goes on to spawn them anyway --
+//     orphaning both, holding their ports, with nothing left to stop them.
+//   - Now that a tray exists, the app's whole point is to survive having no
+//     windows at all (hide-on-close plus closing the boot window is exactly
+//     that state) -- which is also the standard macOS convention.
+app.on("window-all-closed", () => {});

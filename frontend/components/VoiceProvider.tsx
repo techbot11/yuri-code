@@ -65,6 +65,7 @@ import { type Sess } from "@/lib/sessions";
 import { type ToolDef } from "@/lib/voice";
 import { MODEL_OPTIONS, connectionParams, PROVIDER_LABEL } from "@/lib/voiceui";
 import { canTypeToProvider } from "@/lib/compose";
+import { trayStateFor } from "@/lib/trayState";
 import type { DebugEvent } from "./ActivityFeed";
 
 export type Pending = { sessionId: string; kind: string; text: string; options: string[] } | null;
@@ -765,6 +766,25 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
       }),
     [onYuriEvent],
   );
+
+  // Tell the desktop shell what to show in the tray. Guarded: in a browser
+  // there is no bridge, and this must be a no-op rather than a crash.
+  useEffect(() => {
+    const bridge = (window as unknown as {
+      yuriTray?: { set: (s: string) => void };
+    }).yuriTray;
+    if (!bridge) return;
+    bridge.set(trayStateFor({
+      connected,
+      vstate,
+      missionsRunning: missions.filter((m) => m.status === "running").length,
+      // `approvals` here holds every status this session has seen (the GET
+      // has no status filter -- see refreshApprovals above), not just
+      // pending ones, unlike the brief's own draft of this effect. The
+      // Approvals view filters the same way (app/approvals/page.tsx).
+      approvalsPending: approvals.filter((a) => a.status === "pending").length,
+    }));
+  }, [connected, vstate, missions, approvals]);
 
   // The Yuri events stream: mission-level narration AND every view's
   // onYuriEvent fan-out ride the same connection. The poll loop owns the
