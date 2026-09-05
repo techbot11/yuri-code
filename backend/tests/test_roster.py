@@ -56,13 +56,20 @@ class RosterTests(unittest.TestCase):
         self.assertEqual(renamed.slug, s.slug,
                          "the slug moved; a live session launched with the old one")
 
-    def test_a_builtin_cannot_be_archived_but_can_be_edited(self):
+    def test_a_builtin_can_be_edited_and_retired(self):
+        # Was "cannot be archived". Changed on the user's request: a role with
+        # nobody in it is a state the resolver already reports clearly, not a
+        # corruption, and reset() is the way back. The live-task refusal still
+        # applies — see test_archive_refuses_while_a_live_task_holds_it.
         self.svc.seed()
         builtin = self.svc.by_name("Reviewer")
         self.svc.update(builtin.id, system_prompt="Be terse.")
         self.assertEqual(self.svc.by_name("Reviewer").system_prompt, "Be terse.")
-        with self.assertRaises(SpecialistInUse):
-            self.svc.archive(builtin.id)
+        self.svc.archive(builtin.id)
+        self.assertNotIn("Reviewer", [x.name for x in self.svc.list()])
+        # And it comes back.
+        self.svc.reset(builtin.id)
+        self.assertIn("Reviewer", [x.name for x in self.svc.list()])
 
     def test_archive_refuses_while_a_live_task_holds_it(self):
         from yuri.domain.mission import Mission
@@ -167,3 +174,127 @@ class CandidateOrderingTests(RosterTests):
         self.store.specialists = Boom()
         with self.assertRaises(RuntimeError):
             self.svc.candidates("reviewer")
+
+
+class EditingABuiltinTests(unittest.TestCase):
+    """Built-in specialists are editable (the user asked for this), which
+    exposed a live bug: `seed()` guarded by NAME, so renaming a builtin made
+    the next startup try to insert a fresh one and hit
+    `UNIQUE constraint failed: specialists.slug`. Reproduced before fixing.
+
+    Its own setUp rather than subclassing RosterTests: inheriting a class that
+    carries tests re-runs all of them, which inflated the suite by 26 cases
+    once already this session.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Home(os.path.join(self.tmp.name, "Yuri")).ensure()
+        self.store = SqliteStore(self.home.db_path)
+        self.store.migrate()
+        registry = AgentRegistry()
+        registry.register(FakeAgentProvider())
+        self.svc = RosterService(self.store, EventBus(), registry)
+        self.svc.seed()
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self.store.close)
+
+    def _reviewer(self):
+        return next(s for s in self.svc.list() if s.slug == "reviewer")
+
+    def test_a_builtins_prompt_can_be_edited(self):
+        rev = self._reviewer()
+        out = self.svc.update(rev.id, system_prompt="Be extremely strict.")
+        self.assertEqual(out.system_prompt, "Be extremely strict.")
+        self.assertTrue(out.builtin, "editing must not stop it being a builtin")
+
+    def test_an_edit_survives_a_reseed(self):
+        rev = self._reviewer()
+        self.svc.update(rev.id, system_prompt="Be extremely strict.")
+        self.assertEqual(self.svc.seed(), 0)
+        self.assertEqual(self._reviewer().system_prompt, "Be extremely strict.")
+
+    def test_renaming_a_builtin_does_not_make_the_next_seed_insert_a_twin(self):
+        # THE bug. seed() matched by name; the slug stays "reviewer" because
+        # slug is immutable, so the insert collided on the unique index.
+        rev = self._reviewer()
+        self.svc.update(rev.id, name="Strict Reviewer")
+        self.assertEqual(self.svc.seed(), 0, "a renamed builtin was re-seeded")
+        names = sorted(s.name for s in self.svc.list())
+        self.assertIn("Strict Reviewer", names)
+        self.assertNotIn("Reviewer", names)
+
+    def test_a_renamed_builtin_keeps_its_slug(self):
+        # Which is what makes the seed guard stable.
+        rev = self._reviewer()
+        self.assertEqual(self.svc.update(rev.id, name="Strict Reviewer").slug, "reviewer")
+
+    def test_the_new_guard_still_seeds_a_fresh_roster(self):
+        # The guard must not become "never seed anything".
+        store = SqliteStore(os.path.join(self.tmp.name, "second.db"))
+        store.migrate()
+        self.addCleanup(store.close)
+        registry = AgentRegistry()
+        registry.register(FakeAgentProvider())
+        fresh = RosterService(store, EventBus(), registry)
+        self.assertEqual(fresh.seed(), 6)
+        self.assertEqual(fresh.seed(), 0)
+
+    # --- reset --------------------------------------------------------------
+
+    def test_reset_restores_everything_the_builtin_shipped_with(self):
+        rev = self._reviewer()
+        original_prompt, original_name, original_color = (
+            rev.system_prompt, rev.name, rev.color)
+        self.svc.update(rev.id, name="Ruined", system_prompt="lol", color="#000000")
+        out = self.svc.reset(rev.id)
+        self.assertEqual(out.name, original_name)
+        self.assertEqual(out.system_prompt, original_prompt)
+        self.assertEqual(out.color, original_color)
+
+    def test_reset_keeps_the_same_row(self):
+        # Its id is on every task it ever ran; a reset must not orphan that.
+        rev = self._reviewer()
+        self.svc.update(rev.id, system_prompt="changed")
+        self.assertEqual(self.svc.reset(rev.id).id, rev.id)
+
+    def test_reset_refuses_for_a_specialist_the_user_made(self):
+        # There is no default to go back to, and silently doing nothing would
+        # read as "reset worked".
+        mine = self.svc.create(name="Mine", role="reviewer", provider_id="fake")
+        with self.assertRaises(ValueError) as ctx:
+            self.svc.reset(mine.id)
+        self.assertIn("built in", str(ctx.exception))
+
+    def test_a_renamed_builtins_old_name_cannot_be_taken(self):
+        # Written expecting to test a reset name-clash; it turned out create()
+        # raised a raw sqlite3.IntegrityError on the slug instead — a 500 from
+        # the API. The renamed builtin still holds slug "reviewer", so the
+        # real guarantee is that create refuses and NAMES the holder.
+        rev = self._reviewer()
+        self.svc.update(rev.id, name="Strict Reviewer")
+        with self.assertRaises(DuplicateSpecialist) as ctx:
+            self.svc.create(name="Reviewer", role="reviewer", provider_id="fake")
+        self.assertIn("Strict Reviewer", str(ctx.exception))
+        self.assertIn("reviewer", str(ctx.exception))
+
+    def test_a_retired_builtin_comes_back_when_reset(self):
+        # The way back from a retirement, which is why retiring one is safe.
+        rev = self._reviewer()
+        self.svc.archive(rev.id)
+        self.assertNotIn("reviewer", [s.slug for s in self.svc.list()])
+        out = self.svc.reset(rev.id)
+        self.assertFalse(out.archived)
+        self.assertIn("reviewer", [s.slug for s in self.svc.list()])
+
+    def test_a_retired_builtin_is_not_re_seeded_as_a_twin(self):
+        # get_by_slug filters archived = 0, which is why the seed guard reads
+        # list(include_archived=True) instead.
+        rev = self._reviewer()
+        self.svc.archive(rev.id)
+        self.assertEqual(self.svc.seed(), 0, "a retired builtin was re-seeded")
+
+    def test_reset_keeps_it_a_builtin(self):
+        rev = self._reviewer()
+        self.svc.update(rev.id, system_prompt="changed")
+        self.assertTrue(self.svc.reset(rev.id).builtin)

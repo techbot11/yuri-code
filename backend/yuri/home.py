@@ -42,6 +42,18 @@ class Home:
         return os.path.join(self.path, "journal")
 
     @property
+    def templates_dir(self) -> str:
+        """Where the user's own workflow templates live.
+
+        Deliberately NOT the repo's yuri/workflows/templates: those are
+        git-tracked source, a `git pull` would clobber an edit, and an app that
+        rewrites its own source is an app whose diffs lie. A user template
+        overrides a built-in one BY NAME, and deleting it restores the
+        default — the same builtin/user pattern the roster uses.
+        """
+        return os.path.join(self.path, "templates")
+
+    @property
     def workspace_dir(self) -> str:
         return os.path.join(self.path, "workspace")
 
@@ -51,7 +63,8 @@ class Home:
             os.chmod(self.path, 0o700)
         except OSError:
             pass
-        for d in (self.memory_dir, self.projects_memory_dir, self.journal_dir, self.workspace_dir):
+        for d in (self.memory_dir, self.projects_memory_dir, self.journal_dir,
+                  self.templates_dir, self.workspace_dir):
             os.makedirs(d, exist_ok=True)
         if not os.path.exists(self.user_memory_path):
             with open(self.user_memory_path, "w", encoding="utf-8") as f:

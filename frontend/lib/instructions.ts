@@ -17,7 +17,7 @@ export type YuriContext = {
   // real answer she can use ("first time we've talked"). Stamped on voice tool
   // dispatch, not on disconnect; see the backend's SETTINGS_LAST_SPOKE.
   last_spoke_at?: string | null;
-  memory_user: string;
+  memory_core: string;
   journal_today: string;
   // Design §6: a fresh voice session must know the remembered mode without
   // being told. Without it in the prompt, OPERATING's "if it's already quiet
@@ -49,9 +49,17 @@ export function yuriContextBlock(ctx: YuriContext | null | undefined): string {
     lines.push("YOU HAVE NOT SPOKEN BEFORE (as far as you can tell) — this is the first time.");
   }
 
-  const mem = (ctx.memory_user || "").trim();
-  lines.push("", "WHAT YOU REMEMBER ABOUT THEM:",
-    mem ? cap(mem, 4000) : "(nothing yet — use remember when you learn something)");
+  // The core tier, rendered by the backend (yuri/services/recollection.py):
+  // pinned first, then every preference (exempt from the budget), then facts,
+  // then the projects with live work, then the last three days — and a line
+  // naming anything it left out. It arrives with its own heading, because the
+  // wording of "you told me" versus "I think" is part of the selection and
+  // belongs with it.
+  //
+  // Replaces `memory_user`, which was the TAIL of a markdown file: it dropped
+  // the oldest facts, cut the survivor mid-word, and said nothing about it.
+  const mem = (ctx.memory_core || "").trim();
+  lines.push("", mem || "WHAT YOU REMEMBER ABOUT THEM: nothing yet — use remember when you learn something.");
 
   const journal = (ctx.journal_today || "").trim();
   // Absent on a quiet day, and that is not a prompt to invent one.

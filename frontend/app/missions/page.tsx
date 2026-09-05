@@ -12,6 +12,7 @@ import { useCallback, useEffect, useState, type MouseEvent } from "react";
 import { useRouter } from "next/navigation";
 import { useYuri } from "@/components/VoiceProvider";
 import { ViewError } from "@/components/ViewError";
+import { Templates } from "@/components/Templates";
 import { MISSION_CLASS, canCancel, canDelete, canPause, canResume } from "@/lib/missions";
 import { ydelete, yget, ypost, ApiError } from "@/lib/api";
 import type { Mission, ProjectRow } from "@/lib/yuriTypes";
@@ -141,6 +142,12 @@ export default function Page() {
           )}
         </>
       )}
+
+      {/* The plan shapes a mission can be built from. Here rather than in the
+          rail: a template IS a mission's plan, and the rail holds at eight on
+          the rule that it stays in plain words. Collapsed, because the list
+          above is what someone opens this panel for. */}
+      <Templates />
     </div>
   );
 }

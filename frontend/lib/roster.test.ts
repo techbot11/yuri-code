@@ -113,15 +113,31 @@ test("editing round-trips a specialist through the form", () => {
   assert.deepEqual(validateSpecialist(f), {});
 });
 
-test("a builtin offers neither edit nor archive", () => {
-  // A control that would 409 is not rendered.
+test("a builtin can be edited and retired, and offers a way back", () => {
+  // Was "offers neither edit nor archive". Changed on request: the personas
+  // are prompts, and reset is what makes editing or retiring one safe.
   assert.deepEqual(specialistActions({ id: "1", name: "Researcher", role: "researcher",
                                        provider_id: "opencode", builtin: true }),
-                   { edit: false, archive: false });
+                   { edit: true, archive: true, reset: true });
+});
+
+test("a specialist the user made offers no reset", () => {
+  // There is no default to go back to, and a reset button that cannot work
+  // is exactly what GUIDE.md §6 says not to render.
   assert.deepEqual(specialistActions({ id: "2", name: "Mine", role: "reviewer",
                                        provider_id: "opencode" }),
-                   { edit: true, archive: true });
+                   { edit: true, archive: true, reset: false });
+});
+
+test("an already-retired specialist offers no Retire", () => {
   assert.deepEqual(specialistActions({ id: "3", name: "Old", role: "reviewer",
                                        provider_id: "opencode", archived: true }),
-                   { edit: true, archive: false });
+                   { edit: true, archive: false, reset: false });
+});
+
+test("a retired BUILTIN still offers the reset that brings it back", () => {
+  assert.deepEqual(specialistActions({ id: "4", name: "Reviewer", role: "reviewer",
+                                       provider_id: "opencode", builtin: true,
+                                       archived: true }),
+                   { edit: true, archive: false, reset: true });
 });

@@ -35,6 +35,12 @@ from yuri.domain.ids import utcnow
 from yuri.events.bus import EventBus, bridge_to_event_log
 from yuri.home import Home, default_home
 from yuri.mcp.manager import McpManager
+from yuri.services.embed_worker import EmbedWorker
+from yuri.services.embedding import GeminiEmbedder
+from yuri.services.legacy_memory import import_legacy
+from yuri.services.recollection import Recollection
+from yuri.services.rollup import GeminiSummariser, roll_all
+from yuri.services.templates import TemplateStore
 from yuri.narration.policy import MODES, Mode, normalize_mode
 from yuri.narration.service import NarrationService
 from yuri.providers.base import AgentProvider
@@ -42,7 +48,6 @@ from yuri.providers.registry import AgentRegistry, build_registry
 from yuri.services.approvals import ApprovalService
 from yuri.services.dispatch import WorkflowDispatcher
 from yuri.services.journal import Journal
-from yuri.services.memory import Memory
 from yuri.services.missions import MissionService
 from yuri.services.projects import ProjectService
 from yuri.services.roster import RosterService
@@ -71,7 +76,6 @@ class Container:
     registry: AgentRegistry
     router: AgentRouter
     journal: Journal
-    memory: Memory
     narration: NarrationService
     projects: ProjectService
     approvals: ApprovalService
@@ -83,10 +87,25 @@ class Container:
     # container because startup/shutdown own its bus subscription -- nothing
     # else should reach for it.
     dispatcher: WorkflowDispatcher
+    # Memory's two background pieces. The embedder is on the container so a
+    # test can substitute a fake without patching a module global, and the
+    # worker exists so `remember` never blocks on a 1.37s network call.
+    embedder: GeminiEmbedder
+    embed_worker: EmbedWorker
+    # Memory as a service: tools.py and the API go through this, never into
+    # the store, which an architectural test enforces.
+    memories: Recollection
+    # The user's own plan shapes, overlaid on the built-in ones. The only
+    # writer of ~/Yuri/templates; the git-tracked defaults are never touched.
+    templates: TemplateStore
     # Configured MCP servers and the tools they currently provide. Built here
     # but CONNECTED in startup(), because connecting is async and best-effort:
     # a server that will not start must not stop the backend.
     mcp: McpManager
+    # The background rollup, held so shutdown can cancel it rather than
+    # leaving a model call running past the process. Last, and defaulted:
+    # a defaulted dataclass field cannot precede a non-defaulted one.
+    rollup_task: asyncio.Task | None = None
 
 
 _container: Container | None = None
@@ -150,7 +169,6 @@ def build_container(home: Home, registry: AgentRegistry, *, bridge: Bridge | Non
         bus = EventBus(repo=store.events, bridge=bridge)
         router = AgentRouter(registry, default_agent)
         journal = Journal(home)
-        memory = Memory(home)
         narration = NarrationService()
         projects = ProjectService(store, home, bus)
         approvals = ApprovalService(store, bus, journal)
@@ -165,7 +183,11 @@ def build_container(home: Home, registry: AgentRegistry, *, bridge: Bridge | Non
         missions.stop_sessions = sessions.stop_many
         missions.interrupt_sessions = sessions.interrupt_many
         roster = RosterService(store, bus, registry)
-        workflow = WorkflowEngine(store, bus, journal, roster, load_templates())
+        templates = TemplateStore(home.templates_dir)
+        # The user's overrides are loaded HERE, not just the built-ins, so an
+        # edited plan is in effect from the first mission after a restart.
+        workflow = WorkflowEngine(store, bus, journal, roster,
+                                  load_templates(user_dir=home.templates_dir))
         dispatcher = WorkflowDispatcher(store, bus, sessions, workflow)
         # The same injection as stop_sessions above, and for the same reason:
         # the engine cannot import SessionService (which holds the store the
@@ -175,6 +197,7 @@ def build_container(home: Home, registry: AgentRegistry, *, bridge: Bridge | Non
         # only when a user actually released a workflow.
         workflow.dispatch = dispatcher.dispatch
         missions.sync_workflow = dispatcher.sync_workflow
+        embedder = GeminiEmbedder()
         try:
             roster.seed()
         except Exception:
@@ -201,8 +224,10 @@ def build_container(home: Home, registry: AgentRegistry, *, bridge: Bridge | Non
         # must never be published via set_container().
         store.close()
         raise
-    c = Container(home, store, bus, registry, router, journal, memory, narration, projects, approvals, missions,
-                 sessions, roster, workflow, dispatcher, McpManager(home.path))
+    c = Container(home, store, bus, registry, router, journal, narration, projects, approvals, missions,
+                 sessions, roster, workflow, dispatcher, embedder,
+                 EmbedWorker(store, embedder), Recollection(store, embedder),
+                 templates, McpManager(home.path))
     set_container(c)
     return c
 
@@ -232,6 +257,31 @@ async def startup() -> Container:
     # dispatched/completed) and those events should be persisted, not dropped
     # into a queue nobody is reading yet.
     c.dispatcher.start()
+    # After the writer and the driver, before the import: the import writes
+    # rows the worker will then embed on its own.
+    c.embed_worker.start()
+    try:
+        # Once, ever, and the markdown files are never modified (spec §8). Not
+        # a migration: migrate() runs SQL only and has no Home. A failure here
+        # leaves the flag unset so the next start retries, and must not stop
+        # the backend — an unimported memory is a memory she does not have
+        # yet, not a broken app.
+        moved = import_legacy(c.store, c.home)
+        if moved["imported"] or moved["skipped"]:
+            log.info("memory: imported %d line(s) from %s, skipped %d",
+                     moved["imported"], c.home.memory_dir, moved["skipped"])
+    except Exception:
+        log.exception("yuri: importing the existing markdown memory failed; will retry next start")
+    # Turning history into memories, in the background. A TASK rather than an
+    # await: summarising a day is a 1-3s model call per day, and startup must
+    # not wait on the network. roll_all never raises (spec §5.3).
+    async def _rollup() -> None:
+        out = await roll_all(c.store, c.home, GeminiSummariser())
+        if out["days"] or out["observations"]:
+            log.info("memory: rolled up %d day(s) and %d observation(s)",
+                     out["days"], out["observations"])
+
+    c.rollup_task = asyncio.create_task(_rollup())
     try:
         # Best effort, and never blocking: each server has its own bounded
         # connect timeout, and one that fails is logged and simply not
@@ -265,6 +315,15 @@ async def shutdown() -> None:
             await c.mcp.close()
         except Exception:
             log.exception("yuri: stopping MCP servers failed")
+        try:
+            await c.embed_worker.stop()
+        except Exception:
+            log.exception("yuri: stopping the embed worker failed")
+        if c.rollup_task is not None and not c.rollup_task.done():
+            # Cancelled rather than awaited: a day summary is a network call,
+            # and losing one costs nothing (the next start redoes it) while
+            # waiting for one delays shutdown by seconds.
+            c.rollup_task.cancel()
         # Order matters, and it is the reverse of startup: providers stop FIRST,
         # because tearing one down can still publish (a cancelled turn, or
         # session.stopped when VC_KILL_SESSIONS_ON_SHUTDOWN=1). Only then is it

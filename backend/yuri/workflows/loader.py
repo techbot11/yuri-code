@@ -99,8 +99,9 @@ def parse_templates(dir: str | None = None) -> dict[str, Template]:
     return out
 
 
-def load_templates(dir: str | None = None) -> dict[str, Template]:
-    """Parse AND validate every `*.json` template in `dir`, keyed by name.
+def load_templates(dir: str | None = None,
+                   user_dir: str | None = None) -> dict[str, Template]:
+    """Parse AND validate every `*.json` template, keyed by name.
 
     Validation is unconditional, including for a caller-supplied directory.
     Making it depend on whether an argument was passed would mean a caller
@@ -110,6 +111,13 @@ def load_templates(dir: str | None = None) -> dict[str, Template]:
     rather than deadlocking a mission later.
     """
     out = parse_templates(dir)
+    if user_dir and os.path.isdir(user_dir):
+        # The user's own templates override the built-in ones BY NAME, and a
+        # new name is simply added. Loaded second so an override wins, and
+        # validated by the same pass below — a user template that cannot run
+        # must fail here rather than deadlock a mission later, which is what
+        # this function's docstring anticipated before the directory existed.
+        out.update(parse_templates(user_dir))
     for t in out.values():
         validate(t)
     return out

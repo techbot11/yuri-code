@@ -148,9 +148,17 @@ export function formFrom(s: Specialist): SpecialistForm {
   };
 }
 
-/** A control that would fail is not rendered (GUIDE.md §6). A builtin cannot
- *  be archived and its persona is not the user's to rewrite, so the panel
- *  asks the row rather than guessing. */
-export function specialistActions(s: Specialist): { edit: boolean; archive: boolean } {
-  return { edit: !s.builtin, archive: !s.builtin && !s.archived };
+/** A control that would fail is not rendered (GUIDE.md §6), so the panel asks
+ *  the row rather than guessing.
+ *
+ *  Built-ins used to offer neither Edit nor Retire. Both are now allowed —
+ *  the personas are just prompts, and a role with nobody in it is a state the
+ *  resolver reports clearly rather than a corruption. What a builtin gains
+ *  instead is `reset`: the way back from a broken prompt OR a retirement,
+ *  since resetting un-retires it. A specialist the user made has no default
+ *  to go back to, so it offers no reset. */
+export function specialistActions(s: Specialist): {
+  edit: boolean; archive: boolean; reset: boolean;
+} {
+  return { edit: true, archive: !s.archived, reset: Boolean(s.builtin) };
 }

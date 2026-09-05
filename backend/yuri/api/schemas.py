@@ -66,3 +66,26 @@ class WorkflowBody(BaseModel):
 
 class AssignBody(BaseModel):
     specialist_id: str
+
+
+class MemoryBody(BaseModel):
+    """Create or edit a memory. `kind` and `source` are validated by the
+    domain, not here, so there is one validator."""
+    body: str | None = None
+    kind: str | None = None
+    subject: str | None = None
+    source: str | None = None
+    pinned: bool | None = None
+
+
+class SupersedeBody(BaseModel):
+    """Retire a memory. Either point at an existing replacement (`by`) or give
+    the text of a new one (`body`)."""
+    by: str | None = None
+    body: str | None = None
+
+
+class MemorySearch(BaseModel):
+    query: str = ""
+    project: str | None = None
+    since: str | None = None

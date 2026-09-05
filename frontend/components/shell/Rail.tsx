@@ -27,6 +27,12 @@ const ROUTES: Route[] = [
     icon: <><path d="M12 3l7.5 3.2v5.3c0 4.4-3 7.9-7.5 9.2-4.5-1.3-7.5-4.8-7.5-9.2V6.2z" /><path d="M9 12l2.2 2.2L15.4 10" /></> },
   { href: "/terminal", label: "Terminal",
     icon: <><rect x="3" y="4.5" width="18" height="15" rx="2.4" /><path d="M7.5 10.5l2.2 2.2-2.2 2.2M12.5 15h4" /></> },
+  // The ninth. The rail held at eight on the rule that it stays in plain
+  // words rather than jargon; "Memory" is a plain word and a genuinely
+  // distinct thing, and the Dashboard route renders nothing, so there was no
+  // existing home for it.
+  { href: "/memory", label: "Memory",
+    icon: <><path d="M12 3a4 4 0 0 0-4 4v1a3 3 0 0 0 0 6v1a4 4 0 0 0 8 0v-1a3 3 0 0 0 0-6V7a4 4 0 0 0-4-4Z" /><path d="M12 3v18" /></> },
   { href: "/activity", label: "Activity",
     icon: <path d="M3 13h3.6l2-5.5 3 11L17 6.5l1.7 6.5H21" /> },
 ];

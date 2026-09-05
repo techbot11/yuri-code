@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from yuri.domain.event import EventType, YuriEvent
 from yuri.domain.ids import utcnow
-from yuri.domain.specialist import BUILTINS, ROLE_PREFERENCE, Specialist
+from yuri.domain.specialist import BUILTINS, ROLE_PREFERENCE, Specialist, slugify
 from yuri.events.bus import EventBus
 from yuri.providers.registry import AgentRegistry
 from yuri.store.base import Store
@@ -77,8 +77,18 @@ class RosterService:
                 "no agent provider is registered; configure one (YURI_AGENTS) "
                 "before seeding the roster")
         inserted = 0
+        # Guarded by SLUG, not by name, and including archived rows.
+        #
+        # By name was a live bug: a builtin's slug is immutable while its name
+        # is editable, so renaming "Reviewer" made the next start look for a
+        # name that no longer existed, insert a fresh one, and hit
+        # `UNIQUE constraint failed: specialists.slug` on every boot. By slug
+        # is stable across a rename. Including archived rows matters for the
+        # same reason: a retired builtin still holds its slug, and
+        # get_by_slug() filters archived = 0.
+        existing = {s.slug for s in self.store.specialists.list(include_archived=True)}
         for b in BUILTINS:
-            if self.store.specialists.get_by_name(b["name"]) is not None:
+            if slugify(b["name"]) in existing:
                 continue
             fields = dict(b)
             if fields["provider_id"] not in self.registry.ids():
@@ -147,6 +157,17 @@ class RosterService:
         s = Specialist(**fields)
         if self.store.specialists.get_by_name(s.name) is not None:
             raise DuplicateSpecialist(f"a specialist named {s.name!r} already exists")
+        # And the SLUG, which is not the same check. Two different names can
+        # slug alike ("Reviewer" and "reviewer!"), and a renamed builtin keeps
+        # its original slug — so the name can be free while the slug is taken.
+        # Without this the unique index raises sqlite3.IntegrityError, which
+        # the API turns into a 500 instead of a message naming the holder.
+        holder = next((x for x in self.store.specialists.list(include_archived=True)
+                       if x.slug == s.slug), None)
+        if holder is not None:
+            raise DuplicateSpecialist(
+                f"{s.name!r} would share its short name ({s.slug!r}) with "
+                f"{holder.name!r}. Pick a more distinct name.")
         self.store.specialists.insert(s)
         self.bus.publish(YuriEvent.make(EventType.SPECIALIST_CREATED, payload={
             "id": s.id, "name": s.name, "role": s.role, "provider_id": s.provider_id}))
@@ -177,10 +198,19 @@ class RosterService:
         return s
 
     def archive(self, id: str) -> None:
+        """Retire a specialist, built-in or not.
+
+        A builtin used to be refused here. The user asked to be able to retire
+        one they never use, and the reason to refuse was never integrity — a
+        role with nobody in it is a state the resolver already reports
+        clearly ("no specialist can take a 'reviewer' task; create one in the
+        Agents view"). Retiring the last holder of a role is a choice with a
+        visible consequence, not a corruption.
+
+        A builtin's row survives archiving (nothing here deletes), so
+        `reset()` un-retires it — which is the way back.
+        """
         s = self.get(id)
-        if s.builtin:
-            raise SpecialistInUse(
-                f"'{s.name}' is a built-in specialist and cannot be archived")
         holders = self.store.tasks.holders_of(s.id, live_only=True)
         if holders:
             raise SpecialistInUse(
@@ -191,6 +221,55 @@ class RosterService:
         self.store.specialists.update(s)
         self.bus.publish(YuriEvent.make(EventType.SPECIALIST_ARCHIVED,
                                         payload={"id": s.id, "name": s.name}))
+
+    def reset(self, id: str) -> Specialist:
+        """Put a built-in specialist back to what it shipped with.
+
+        The row is kept — its id is on every task it ever ran, so replacing it
+        would orphan that history. Only the fields BUILTINS declares are
+        restored, plus `archived`, so a retired builtin comes back. That is
+        deliberately the way back from both a broken persona and a retirement.
+
+        Matched by SLUG for the same reason seed() is: the name may have been
+        edited, the slug cannot be.
+        """
+        s = self.get(id)
+        if not s.builtin:
+            raise ValueError(
+                f"'{s.name}' is not built in, so there is no default to go back to. "
+                "Edit it, or archive it and make a new one.")
+        default = next((b for b in BUILTINS if slugify(b["name"]) == s.slug), None)
+        if default is None:
+            # Reachable only if BUILTINS drops one that a database still
+            # holds. Saying so beats resetting to nothing.
+            raise ValueError(
+                f"'{s.name}' is marked built-in but is not one of the current defaults, "
+                "so it has no default to go back to.")
+        # Belt and braces: create() now refuses to take a renamed builtin's
+        # slug, so nothing else can be holding the default NAME either. Kept
+        # because BUILTINS can change under an existing database.
+        clash = self.store.specialists.get_by_name(default["name"])
+        if clash is not None and clash.id != s.id:
+            raise DuplicateSpecialist(
+                f"resetting would rename this back to {default['name']!r}, and a "
+                f"specialist by that name already exists. Rename that one first.")
+        fields = dict(default)
+        provider = fields.get("provider_id")
+        if provider not in self.registry.ids():
+            # Same remap seed() does: a default pointing at an unregistered
+            # provider would reset it into a broken button.
+            fields["provider_id"] = self._fallback_provider()
+        for k in _UPDATABLE:
+            if k in fields:
+                setattr(s, k, fields[k])
+        s.archived = False
+        s.__post_init__()
+        s.updated_at = utcnow()
+        self.store.specialists.update(s)
+        self.bus.publish(YuriEvent.make(EventType.SPECIALIST_UPDATED, payload={
+            "id": s.id, "name": s.name, "role": s.role,
+            "provider_id": s.provider_id, "reset": True}))
+        return s
 
     # --- routing (spec §6) ---------------------------------------------
     def candidates(self, role: str, requires: frozenset[str] = frozenset()) -> list[Specialist]:

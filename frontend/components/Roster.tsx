@@ -26,7 +26,10 @@ export function Roster() {
 
   const load = useCallback(async () => {
     try {
-      const data = await yget<{ specialists: Specialist[] }>("specialists");
+      // include_archived, or a retired builtin would vanish from the panel
+      // and its "Bring back" button would be unreachable.
+      const data = await yget<{ specialists: Specialist[] }>(
+        "specialists?include_archived=true");
       setRows(data.specialists || []);
       setLoadError(null);
     } catch (e) {
@@ -63,6 +66,21 @@ export function Roster() {
     } catch (e) {
       // A 409 here is meaningful — a live step is holding it — so it goes
       // where the user is looking rather than into the console.
+      setSaveError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const reset = async (s: Specialist) => {
+    setBusy(s.id);
+    setSaveError("");
+    try {
+      await ypost(`specialists/${s.id}/reset`);
+      await load();
+    } catch (e) {
+      // A 409 here is meaningful (the default name is taken), so it goes
+      // where the user is looking.
       setSaveError(e instanceof ApiError ? e.message : String(e));
     } finally {
       setBusy("");
@@ -121,6 +139,7 @@ export function Roster() {
               busy={busy === s.id}
               onEdit={() => { setForm(formFrom(s)); setEditingId(s.id); setSaveError(""); }}
               onArchive={() => void archive(s)}
+              onReset={() => void reset(s)}
             />
           ))}
         </div>
