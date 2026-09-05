@@ -27,10 +27,19 @@ const FRONTEND_URL = `http://localhost:${ports.frontend}`;
 
 let mainWindow: BrowserWindow | null = null;
 let bootWindow: BrowserWindow | null = null;
-// The ONLY thing that lets a close event through to actually destroy a
-// window. Without it, the close handler below would also swallow ⌘Q --
-// see the before-quit handler at the bottom of this file.
+// Set by before-quit, and read by the window's close handler so a real quit
+// can actually destroy the window. NOTHING else writes it: a call site that
+// sets it first (boot:quit used to) makes before-quit's own re-entry guard
+// skip the drain, orphaning both children holding their ports while the app
+// exits anyway via the default window-all-closed path.
 let quitting = false;
+// Guards the retry cycle end-to-end (stopServers()'s ~3.5s drain, then a
+// fresh boot()), not just one half of it. Both stopServers()'s module-level
+// children/died state (servers.ts) and mainWindow are shared, unguarded
+// mutable state -- a second retry click while one cycle is in flight can
+// silently overwrite mainWindow with an orphaned second window, or SIGKILL
+// children the second click only just spawned.
+let booting = false;
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -71,11 +80,13 @@ function createWindow(): BrowserWindow {
     event.preventDefault();
     win.hide();
   });
-  // Electron's 'minimize' fires AFTER the OS already minimized the window --
-  // it is not cancelable (no event.preventDefault() here, unlike 'close') --
-  // so this hides it right back rather than leaving it sitting minimized in
-  // the Dock, which would be a second, inconsistent "closed" state.
-  win.on("minimize", () => win.hide());
+  // No 'minimize' handler, deliberately (considered, not forgotten): Electron
+  // fires it AFTER the OS already minimized the window and it is not
+  // cancelable, so hiding in response would only add a flicker -- the genie
+  // animation plays, then the window vanishes from the Dock -- for no
+  // benefit. A minimized renderer is not destroyed, which is the property
+  // this app actually needs, and showMainWindow()'s win.show() un-minimizes
+  // exactly as well as it un-hides.
 
   return win;
 }
@@ -90,15 +101,25 @@ function createBootWindow(): BrowserWindow {
     backgroundColor: "#1a1917",
     webPreferences: { preload: path.join(__dirname, "../preload/index.js") },
   });
+  // The default app menu is still active here (no Menu.setApplicationMenu),
+  // so ⌘W can close this window mid-boot. Track that so pushBoot() and the
+  // success path below stop reaching for a destroyed window instead of
+  // throwing inside boot()'s promise chain, where nothing would catch it.
+  win.on("closed", () => {
+    bootWindow = null;
+  });
   void win.loadFile(path.join(__dirname, "../boot/index.html"));
   return win;
 }
 
 /** Push the current boot state to the boot window. `env`/`envDetail` cover
  *  the shell-probe row, which is not part of BootState (it finishes before
- *  startServers begins and never fails outright, only falls back). */
+ *  startServers begins and never fails outright, only falls back). A no-op
+ *  once the window is gone (⌘W mid-boot, or the success path already closed
+ *  it) rather than sending into -- or closing -- a destroyed window. */
 function pushBoot(state: BootState, env: ChildState, envDetail = ""): void {
-  bootWindow?.webContents.send("boot:state", {
+  if (!bootWindow || bootWindow.isDestroyed()) return;
+  bootWindow.webContents.send("boot:state", {
     phase: env === "failed" ? "failed" : bootPhase(state),
     env,
     envDetail,
@@ -133,8 +154,24 @@ async function boot(): Promise<void> {
   mainWindow = createWindow();
   await mainWindow.loadURL(FRONTEND_URL);
   mainWindow.show();
-  bootWindow?.close();
+  if (bootWindow && !bootWindow.isDestroyed()) bootWindow.close();
   bootWindow = null;
+}
+
+/** The whole retry cycle: drain the old children, then boot from scratch.
+ *  `booting` is set for its full duration -- not just boot()'s share of it
+ *  -- because a click landing during the ~3.5s stopServers() drain is just
+ *  as capable of starting an overlapping cycle as one landing during boot()
+ *  itself. */
+async function restart(): Promise<void> {
+  if (booting) return;
+  booting = true;
+  try {
+    await stopServers();
+    await boot();
+  } finally {
+    booting = false;
+  }
 }
 
 export function showMainWindow(): void {
@@ -149,26 +186,44 @@ app.whenReady().then(async () => {
   await new Promise<void>((resolve) =>
     bootWindow!.webContents.once("did-finish-load", () => resolve()),
   );
-  await boot();
+  // An unhandled rejection here is a boot that stops silently -- the one
+  // thing this window exists to prevent -- so it is logged rather than left
+  // to vanish into whatever process.on("unhandledRejection") does by default.
+  // Only ever the message of our own thrown error, never anything reached
+  // via a probe or a spawned child's environment.
+  await boot().catch((err) => {
+    console.error("[yuri] boot() rejected:", err instanceof Error ? err.message : err);
+  });
 
   ipcMain.on("boot:retry", () => {
-    void stopServers().then(() => boot());
+    void restart().catch((err) => {
+      console.error("[yuri] restart() rejected:", err instanceof Error ? err.message : err);
+    });
   });
+  // No flag here: before-quit is the only place quitting is set. Setting it
+  // at this call site used to make before-quit's own re-entry guard skip the
+  // drain, so the app exited via the default window-all-closed path with
+  // both children still holding their ports.
   ipcMain.on("boot:quit", () => {
-    quitting = true;
     app.quit();
   });
 
   globalShortcut.register("CommandOrControl+Shift+Y", () => showMainWindow());
 });
 
-// The ONLY path that stops anything. Without the flag, the close handler
-// above would prevent the quit as well and the app could never exit.
+// The ONLY writer of `quitting`, and the ONLY path that stops anything.
+// Without the flag, the close handler above would prevent the quit as well
+// and the app could never exit; without this being the sole writer, a call
+// site that sets it first (⌘Q via the app menu, the boot page's Quit button,
+// a future tray "Quit") makes this guard skip the drain instead of running
+// it.
 app.on("before-quit", (event) => {
   if (quitting) return;
   quitting = true;
   event.preventDefault();
-  void stopServers().then(() => app.exit(0));
+  // finally, not then: a stopServers() that rejects must still exit rather
+  // than leaving the app un-quittable.
+  void stopServers().finally(() => app.exit(0));
 });
 
 // macOS: clicking the Dock icon after a hide must bring her back.
