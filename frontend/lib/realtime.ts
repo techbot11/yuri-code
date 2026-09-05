@@ -63,7 +63,9 @@ export class RealtimeSession implements VoiceSession {
   // nothing to do.
   private continuationFallback: ReturnType<typeof setTimeout> | null = null;
   private static CONTINUATION_FALLBACK_MS = 1500;
-  // True from output_audio_buffer.started until output_audio_buffer.stopped.
+  // True from output_audio_buffer.started until playback ends — which is
+  // output_audio_buffer.stopped OR .cleared (a barge-in throwing the buffer
+  // away is just as much an end of playback), and stop() either way.
   // response.completed/response.done fire when the MODEL finishes generating —
   // the audio it produced can still be queued and playing for a while after
   // that. Announcing "listening" on those events flips the tray/orb state
@@ -184,6 +186,11 @@ export class RealtimeSession implements VoiceSession {
   stop(): void {
     for (const t of this.callFallbackTimers.values()) clearTimeout(t);
     this.callFallbackTimers.clear();
+    // Nothing can be playing once the peer connection is gone, and no
+    // .stopped/.cleared will arrive to say so. Leaving this true would make
+    // the NEXT session start with response.completed's "listening" already
+    // suppressed, if this instance is reused.
+    this.audioPlaying = false;
     if (this.continuationFallback) {
       clearTimeout(this.continuationFallback);
       this.continuationFallback = null;
@@ -454,8 +461,21 @@ export class RealtimeSession implements VoiceSession {
         this.audioPlaying = true;
         emit({ type: "state", state: "speaking" });
         break;
+      // Both ends of playback, and BOTH have to be handled. `.stopped` is a
+      // buffer that finished; `.cleared` is one that was thrown away, which
+      // is what the server sends when a barge-in cuts the assistant off
+      // mid-sentence (this file's own note at the getUserMedia call records
+      // observing 4x `.cleared` in one session). Handling only `.stopped`
+      // left audioPlaying stuck true after every interruption, and the
+      // response.completed / response.done guards below then swallowed the
+      // "listening" that should have followed — self-healing on the next
+      // utterance via "hearing", but a lie for one interleaving too long.
+      // gemini.ts settles the equivalent turnClosePending in
+      // stopAllPlayback() for exactly this reason; this is the same fix on
+      // the sibling that did not get it.
       case "output_audio_buffer.stopped":
-        // The true end-of-playback signal — always safe to announce.
+      case "output_audio_buffer.cleared":
+        // The true end of playback either way — always safe to announce.
         this.audioPlaying = false;
         emit({ type: "state", state: "listening" });
         break;

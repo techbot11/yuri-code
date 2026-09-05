@@ -64,6 +64,38 @@ test("response.done with no audio reaches listening immediately too", async () =
   assert.deepEqual(states(), ["thinking", "listening"]);
 });
 
+test("a barge-in's output_audio_buffer.cleared ends playback, same as .stopped", async () => {
+  // The server sends .cleared, NOT .stopped, when playback is cut off by a
+  // barge-in — this file's subject sibling gemini.ts settles its equivalent
+  // flag in stopAllPlayback() for the same reason. Handling only .stopped
+  // left audioPlaying true forever after an interruption.
+  const { session, states } = newSession();
+  await session.handleEvent(JSON.stringify({ type: "response.created" }));
+  await session.handleEvent(JSON.stringify({ type: "output_audio_buffer.started" }));
+  await session.handleEvent(JSON.stringify({ type: "output_audio_buffer.cleared" }));
+  assert.deepEqual(states(), ["thinking", "speaking", "listening"]);
+
+  // And the flag really is settled: the NEXT response's completion must be
+  // able to announce "listening" on its own. This is the assertion that
+  // fails without the fix — the state sequence above could also be produced
+  // by a .cleared that emitted "listening" without clearing the flag.
+  await session.handleEvent(JSON.stringify({ type: "response.created" }));
+  await session.handleEvent(JSON.stringify({ type: "response.completed" }));
+  assert.deepEqual(states(),
+    ["thinking", "speaking", "listening", "thinking", "listening"]);
+});
+
+test("stop() settles audioPlaying, so a reused session is not born mute", async () => {
+  const { session, states } = newSession();
+  await session.handleEvent(JSON.stringify({ type: "response.created" }));
+  await session.handleEvent(JSON.stringify({ type: "output_audio_buffer.started" }));
+  // No .stopped or .cleared will ever arrive: the connection is going away.
+  session.stop();
+  await session.handleEvent(JSON.stringify({ type: "response.created" }));
+  await session.handleEvent(JSON.stringify({ type: "response.completed" }));
+  assert.deepEqual(states(), ["thinking", "speaking", "thinking", "listening"]);
+});
+
 test("a second response's audio does not fire listening early from a stale flag", async () => {
   // Regression guard for audioPlaying leaking across responses: started/
   // stopped/completed for one full turn, then the same sequence again.
