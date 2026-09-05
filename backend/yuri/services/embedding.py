@@ -89,10 +89,17 @@ class GeminiEmbedder:
             # Names Setup, not backend/.env: that file is the lowest-
             # precedence source now, so pointing a user at it can send them
             # to edit something that has no effect.
+            #
+            # This one DOES need a restart, unlike own/search.py's message:
+            # __init__ captures the key once, and the embedder is built a
+            # single time when the container is built (yuri/app.py). So a key
+            # saved in Setup reaches os.environ immediately and this object
+            # still holds "" until the process restarts. Say so, or the user
+            # saves the key, sees no change, and concludes Setup is broken.
             raise EmbeddingUnavailable(
                 "I can't search my memory by meaning — GEMINI_API_KEY isn't set. "
-                "Add it under Setup. Everything I remember is still there and still "
-                "findable by project or by date.")
+                "Add it under Setup, then restart me. Everything I remember is "
+                "still there and still findable by project or by date.")
         if not texts:
             return []
         one = len(texts) == 1

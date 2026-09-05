@@ -134,9 +134,16 @@ async def search(query: str, *, api_key: str | None = None,
         # source now (below the file Setup writes), so telling the user to
         # edit it is telling them to do something that may have no effect.
         # Same correction as session_manager's no-allowed-roots message.
+        #
+        # And no restart claim, because none is needed: the key is read from
+        # os.getenv on EVERY call (see above), and PUT /yuri/config updates
+        # this process's environment as well as the file -- which is why
+        # MANAGED_KEYS declares GEMINI_API_KEY effect="now". The old wording
+        # said "restart the backend", the same false claim the ruling on
+        # session_manager's message had to correct.
         raise SearchUnavailable(
             "I can't search — GEMINI_API_KEY isn't set. Add it under Setup "
-            "and restart the backend.")
+            "and I can search straight away.")
 
     body = {
         "contents": [{"parts": [{"text": q}]}],

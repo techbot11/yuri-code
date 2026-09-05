@@ -119,6 +119,13 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("GEMINI_API_KEY", msg)
         self.assertIn("Setup", msg)
         self.assertNotIn(".env", msg)
+        # And it must NOT claim a restart is needed. The key is read from
+        # os.getenv on every call and PUT /yuri/config updates os.environ, so
+        # a save works immediately -- which is why MANAGED_KEYS declares
+        # GEMINI_API_KEY effect="now". Contrast services/embedding.py, whose
+        # message DOES need the restart because that object caches the key at
+        # construction; the two are deliberately different.
+        self.assertNotIn("restart", msg.lower())
 
     async def test_the_upstream_body_is_never_relayed(self):
         # It can carry the key or a long trace, and this text is both spoken

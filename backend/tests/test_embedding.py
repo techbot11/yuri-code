@@ -101,6 +101,13 @@ class GeminiEmbedderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("GEMINI_API_KEY", msg)
         self.assertIn("Setup", msg)
         self.assertNotIn("backend/.env", msg)
+        # It MUST ask for a restart, unlike own/search.py's equivalent:
+        # __init__ captures the key once and yuri/app.py builds the embedder a
+        # single time, so a key saved in Setup reaches os.environ immediately
+        # and this object still holds "" until the process restarts. Without
+        # this sentence the user saves the key, sees no change, and concludes
+        # Setup is broken.
+        self.assertIn("restart", msg.lower())
         # And it says what still works, so she does not report total failure.
         self.assertIn("still findable", msg)
 
