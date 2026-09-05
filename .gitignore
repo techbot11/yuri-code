@@ -33,3 +33,4 @@ debug-log.jsonl
 
 # Superpowers SDD scratch (ledger, briefs, review packages)
 .superpowers/
+.claude/worktrees/
