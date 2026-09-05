@@ -10,14 +10,18 @@ APP_ROOT="${YAPCODE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 # or outside the valid TCP range. Mirrors desktop/lib/ports.ts's parsePort()
 # so `yuri app`'s port guard and build check agree with the ports the shell
 # itself will actually bind — a silent fallback on a typo'd port would waste
-# far more time than a clear rejection. Parity with parsePort() (which coerces
-# via JS `Number()`) is behavioral for realistic values, not exact: leading
-# and trailing whitespace is stripped first, since `Number(" 3199 ")` is 3199
-# and a guard that fell back to the default on that input would be exactly
-# the guard/shell divergence this function exists to prevent. Other forms
-# `Number()` also accepts — "+8080", "8080.0", "8e3", "0x10" — are left
-# rejected here; they're exotic enough that a clear fallback beats matching
-# `Number()`'s coercion rules precisely.
+# far more time than a clear rejection.
+#
+# Parity is now EXACT, not merely behavioral for realistic values: trim
+# whitespace, require digits only, then range-check. parsePort() used to
+# coerce via JS `Number()`, which accepts forms the digits-only case below
+# rejects — "+8198" (8198), "8198.0" (8198), "0x2016" (8214), "8e3" (8000).
+# Every one of those was a divergence with real consequences, since this
+# function decides which BACKEND_URL the frontend build is stamped for while
+# parsePort() decides which port the shell binds: `+8198` stamped the build
+# for http://localhost:8000 and bound 8198, so the interface proxied to
+# whatever owned 8000. parsePort() was tightened to match this side — do NOT
+# loosen this side to match `Number()`.
 port_from_env() {
   local value="$1" fallback="$2"
   # Strip leading/trailing whitespace (space, tab, newline, CR) the same way

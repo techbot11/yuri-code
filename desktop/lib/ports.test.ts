@@ -44,6 +44,37 @@ test("a fractional value falls back", () => {
   assert.equal(portsFromEnv({ YURI_DESKTOP_BACKEND_PORT: "8177.5" }).backend, 8000);
 });
 
+// The three forms `Number()` accepts and bin/yuri's port_from_env() does
+// not. Each of them, parsed by Number(), is how the shell came to bind a
+// port the frontend build had not been stamped for -- so the frontend
+// proxied to http://localhost:8000, the default the stamp fell back to,
+// which on a developer's machine is often their own live backend.
+test("a leading plus falls back -- Number('+8198') is 8198, bash rejects it", () => {
+  assert.equal(portsFromEnv({ YURI_DESKTOP_BACKEND_PORT: "+8198" }).backend, 8000);
+});
+
+test("a trailing .0 falls back -- Number('8198.0') is an integer 8198", () => {
+  assert.equal(portsFromEnv({ YURI_DESKTOP_BACKEND_PORT: "8198.0" }).backend, 8000);
+});
+
+test("hex falls back -- Number('0x2016') is 8214, a THIRD port", () => {
+  // The worst of the three: it parses, it is in range, and it is neither the
+  // number written nor the default.
+  assert.equal(portsFromEnv({ YURI_DESKTOP_BACKEND_PORT: "0x2016" }).backend, 8000);
+});
+
+test("exponent notation falls back", () => {
+  assert.equal(portsFromEnv({ YURI_DESKTOP_BACKEND_PORT: "8e3" }).backend, 8000);
+});
+
+test("surrounding whitespace is stripped, as port_from_env() strips it", () => {
+  // Both sides must agree here too, in the OTHER direction: bash trims
+  // before its digits check, so falling back on this would be the same
+  // divergence with the sides swapped.
+  assert.equal(portsFromEnv({ YURI_DESKTOP_BACKEND_PORT: " 3199 " }).backend, 3199);
+  assert.equal(portsFromEnv({ YURI_DESKTOP_BACKEND_PORT: "\t8198\n" }).backend, 8198);
+});
+
 test("an empty string falls back", () => {
   assert.equal(portsFromEnv({ YURI_DESKTOP_BACKEND_PORT: "" }).backend, 8000);
 });

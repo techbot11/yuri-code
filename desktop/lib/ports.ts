@@ -18,13 +18,29 @@ export function defaultPorts(): Ports {
   return { backend: DEFAULT_BACKEND_PORT, frontend: DEFAULT_FRONTEND_PORT };
 }
 
-/** A port from the environment, or `fallback` if the value is missing, not an
- *  integer, or outside the valid TCP port range. A silent fallback on a
- *  typo'd port would waste far more time than a clear rejection, so this
- *  validates rather than trusting `Number()` to fail closed on its own. */
+/** A port from the environment, or `fallback` if the value is not a plain
+ *  decimal integer in the valid TCP port range.
+ *
+ *  Digits only, deliberately -- NOT `Number()`. `Number()` accepts forms
+ *  bash's `case "$value" in *[!0-9]*)` does not: `"+8198"` -> 8198,
+ *  `"8198.0"` -> 8198, `"0x2016"` -> 8214. bin/yuri's port_from_env() falls
+ *  back to the default on all three, and that disagreement is not cosmetic.
+ *  port_from_env() decides which BACKEND_URL the frontend build is STAMPED
+ *  for, while this decides which port the shell actually binds -- so with
+ *  YURI_DESKTOP_BACKEND_PORT=+8198, bash stamps the build for
+ *  http://localhost:8000 while the shell binds 8198, and the frontend then
+ *  proxies every request to port 8000, which may well be someone's own live
+ *  backend. The two must agree by CONSTRUCTION, which means the stricter
+ *  rule on both sides rather than teaching bash `Number()`'s coercions.
+ *
+ *  Whitespace is trimmed first, matching port_from_env()'s own strip: a
+ *  guard that fell back on `" 3199 "` while the shell bound 3199 would be
+ *  exactly the divergence this exists to prevent. */
 function parsePort(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 && parsed < 65536 ? parsed : fallback;
+  const digits = (value ?? "").trim();
+  if (!/^\d+$/.test(digits)) return fallback;
+  const parsed = Number(digits);
+  return parsed > 0 && parsed < 65536 ? parsed : fallback;
 }
 
 /** Ports from YURI_DESKTOP_BACKEND_PORT / YURI_DESKTOP_FRONTEND_PORT, falling
