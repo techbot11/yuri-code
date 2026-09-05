@@ -1,0 +1,88 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Starting Yuri</title>
+<style>
+  /* Copied from frontend/app/globals.css :root -- this page renders before
+     Next exists, so it cannot import the app's stylesheet. Keep in step. */
+  :root {
+    --bg: #1a1917; --panel: #211f1d; --ink: #e9e3d8; --mut: #928c81;
+    --dim: #6f6a61; --acc: #dd8a6a; --line: #322f2b;
+    --good: #9cc7a4; --danger: #d98a8a;
+  }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px ui-sans-serif, system-ui, -apple-system, sans-serif;
+    display: grid; place-items: center; height: 100vh;
+  }
+  .card { width: 380px; }
+  h1 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--mut); font-weight: 400; margin: 0 0 18px;
+  }
+  ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 9px; }
+  li { display: grid; grid-template-columns: 16px 1fr; gap: 10px; align-items: baseline; }
+  .mark { color: var(--dim); }
+  li[data-state="ready"] .mark { color: var(--good); }
+  li[data-state="failed"] .mark { color: var(--danger); }
+  .detail { color: var(--mut); font-size: 12.5px; }
+  pre {
+    margin: 16px 0 0; padding: 10px 12px; max-height: 180px; overflow: auto;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    font: 11.5px ui-monospace, Menlo, monospace; color: var(--mut);
+    white-space: pre-wrap;
+  }
+  .actions { margin-top: 16px; display: flex; gap: 8px; }
+  button {
+    font: inherit; font-size: 12.5px; color: var(--ink); background: none;
+    border: 1px solid var(--line); border-radius: 999px; padding: 5px 14px;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--acc); color: var(--acc); }
+  [hidden] { display: none !important; }
+</style>
+<div class="card">
+  <h1 id="head">Starting Yuri</h1>
+  <ul>
+    <li id="row-env" data-state="starting">
+      <span class="mark">·</span><span>Finding your tools<span class="detail" id="d-env"></span></span>
+    </li>
+    <li id="row-backend" data-state="starting">
+      <span class="mark">·</span><span>Backend<span class="detail" id="d-backend"></span></span>
+    </li>
+    <li id="row-frontend" data-state="starting">
+      <span class="mark">·</span><span>Interface<span class="detail" id="d-frontend"></span></span>
+    </li>
+  </ul>
+  <pre id="stderr" hidden></pre>
+  <div class="actions" hidden id="actions">
+    <button id="retry">Try again</button>
+    <button id="quit">Quit</button>
+  </div>
+</div>
+<script>
+  const MARK = { starting: "·", ready: "✓", failed: "✗" };
+  function row(id, state, detail) {
+    const li = document.getElementById("row-" + id);
+    if (!li) return;
+    li.dataset.state = state;
+    li.querySelector(".mark").textContent = MARK[state] || "·";
+    if (detail) document.getElementById("d-" + id).textContent = " · " + detail;
+  }
+  // The main process pushes state; this page only renders it. Every line is a
+  // real check, not a spinner on a timer -- a boot that lies about progress
+  // is worse than one that looks slow.
+  window.yuriBoot?.onState((s) => {
+    row("env", s.env || "starting", s.envDetail);
+    row("backend", s.backend, s.backendDetail);
+    row("frontend", s.frontend, s.frontendDetail);
+    const failed = s.phase === "failed";
+    document.getElementById("head").textContent =
+      failed ? "Yuri could not start" : "Starting Yuri";
+    document.getElementById("actions").hidden = !failed;
+    const pre = document.getElementById("stderr");
+    pre.hidden = !failed || !s.errorDetail;
+    if (s.errorDetail) pre.textContent = s.errorDetail;
+  });
+  document.getElementById("retry").onclick = () => window.yuriBoot?.retry();
+  document.getElementById("quit").onclick = () => window.yuriBoot?.quit();
+</script>
