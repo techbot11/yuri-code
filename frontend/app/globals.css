@@ -4464,3 +4464,38 @@ a.miss-row {
 .mem-state.in {
    color: var(--acc);
 }
+
+/* --- panel tabs ----------------------------------------------------------
+   Routes, not state (see app/agents/layout.tsx). Styled as a row of quiet
+   links with the active one carrying the accent underline — the same
+   language .modeseg/.segbtn use for a segmented choice, without the filled
+   pill, because these navigate rather than set a value. */
+.tabs {
+   display: flex;
+   gap: 4px;
+   flex-wrap: wrap;
+   border-bottom: 1px solid var(--line);
+   margin-bottom: 16px;
+}
+
+.tab {
+   font-size: 12.5px;
+   color: var(--mut);
+   text-decoration: none;
+   padding: 7px 12px 9px;
+   border-bottom: 2px solid transparent;
+   margin-bottom: -1px;
+}
+
+.tab:hover {
+   color: var(--ink);
+}
+
+.tab.on {
+   color: var(--acc);
+   border-bottom-color: var(--acc);
+}
+
+.engines-view {
+   min-width: 0;
+}
