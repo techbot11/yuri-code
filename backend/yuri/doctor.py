@@ -6,15 +6,32 @@ import asyncio
 import os
 import shutil
 import sys
+from dataclasses import dataclass
 
 import config
 from yuri.home import Home
 from yuri.store.sqlite import SCHEMA_VERSION, SqliteStore
 
 
-def _line(ok: bool, label: str, detail: str) -> bool:
-    print(f"  {'✓' if ok else '✗'} {label:<14} {detail}")
-    return ok
+@dataclass(frozen=True)
+class Check:
+    """One environment check, as data. `required` means Yuri cannot work
+    without it — see REQUIRED_CHECKS for why tmux is not one of them."""
+    name: str
+    ok: bool
+    detail: str
+    required: bool
+
+
+# Yuri cannot work at all without these. tmux is absent on purpose: without
+# it the cli backend loses its live terminal pane, but the sdk backend still
+# runs (spec §2.1). opencode is absent because it already only matters when
+# YURI_AGENTS asks for it.
+REQUIRED_CHECKS: frozenset[str] = frozenset({"home", "database", "claude", "voice keys"})
+
+
+def _check(name: str, ok: bool, detail: str) -> Check:
+    return Check(name=name, ok=ok, detail=detail, required=name in REQUIRED_CHECKS)
 
 
 def _opencode_reachable() -> bool:
@@ -56,15 +73,17 @@ def _opencode_status() -> tuple[str, str]:
                          "start one when a session needs it")
 
 
-def main(argv: list[str]) -> int:
-    print("yuri doctor")
-    ok = True
+def checks() -> list[Check]:
+    """Run every probe and return the results. Prints nothing — `main` does
+    the printing, and the API renders the same records, so the CLI and the UI
+    cannot disagree."""
+    out: list[Check] = []
     home = Home(config.YURI_HOME)
     try:
         home.ensure()
-        ok &= _line(True, "home", home.path)
+        out.append(_check("home", True, home.path))
     except Exception as exc:
-        ok &= _line(False, "home", f"{home.path}: {exc}")
+        out.append(_check("home", False, f"{home.path}: {exc}"))
     try:
         store = SqliteStore(home.db_path)
         try:
@@ -72,9 +91,10 @@ def main(argv: list[str]) -> int:
             v = store.settings.get("schema_version")
         finally:
             store.close()
-        ok &= _line(v == SCHEMA_VERSION, "database", f"{home.db_path} (schema v{v})")
+        out.append(_check("database", v == SCHEMA_VERSION,
+                          f"{home.db_path} (schema v{v})"))
     except Exception as exc:
-        ok &= _line(False, "database", str(exc))
+        out.append(_check("database", False, str(exc)))
 
     # config.allowed_project_roots() always appends Yuri's own home once it
     # exists on disk (independent of ALLOWED_PROJECT_ROOTS), and home.ensure()
@@ -89,40 +109,49 @@ def main(argv: list[str]) -> int:
     home_real = os.path.realpath(home.path)
     project_roots = [r for r in roots if r != home_real]
     if project_roots:
-        ok &= _line(True, "allowed roots", ", ".join(roots))
+        out.append(_check("allowed roots", True, ", ".join(roots)))
     elif raw_roots:
-        ok &= _line(False, "allowed roots",
-                     f"ALLOWED_PROJECT_ROOTS={raw_roots!r} resolves to nothing outside "
-                     f"Yuri's own home ({home_real}); only her home is reachable — fix "
-                     f"ALLOWED_PROJECT_ROOTS in backend/.env")
+        out.append(_check("allowed roots", False,
+                          f"ALLOWED_PROJECT_ROOTS={raw_roots!r} resolves to nothing outside "
+                          f"Yuri's own home ({home_real}); only her home is reachable — fix "
+                          f"ALLOWED_PROJECT_ROOTS in Setup"))
     else:
-        ok &= _line(False, "allowed roots",
-                     f"ALLOWED_PROJECT_ROOTS is not set — only Yuri's own home "
-                     f"({home_real}) is reachable; set ALLOWED_PROJECT_ROOTS in "
-                     f"backend/.env so she can work in your projects (sessions "
-                     f"elsewhere will refuse to start)")
+        out.append(_check("allowed roots", False,
+                          f"ALLOWED_PROJECT_ROOTS is not set — only Yuri's own home "
+                          f"({home_real}) is reachable; set it in Setup so she can work in "
+                          f"your projects (sessions elsewhere will refuse to start)"))
 
     claude = shutil.which("claude")
-    ok &= _line(claude is not None, "claude", claude or "not on PATH — install Claude Code")
+    out.append(_check("claude", claude is not None,
+                      claude or "not on PATH — install Claude Code"))
     tmux = shutil.which("tmux")
-    ok &= _line(tmux is not None, "tmux", tmux or "not on PATH — brew install tmux")
+    out.append(_check("tmux", tmux is not None,
+                      tmux or "not on PATH — brew install tmux. Without it the live "
+                              "terminal pane is unavailable; agents still run."))
     keys = config.voice_keys_found()
-    ok &= _line(bool(keys), "voice keys", ", ".join(f"{k} ({src})" for k, src in keys) or "none found")
-    _line(True, "agents", config.YURI_AGENTS)
+    out.append(_check("voice keys", bool(keys),
+                      ", ".join(f"{k} ({src})" for k, src in keys)
+                      or "none found — add one in Setup"))
+    out.append(_check("agents", True, config.YURI_AGENTS))
 
-    # OpenCode is optional: it always gets a line, but it only gates the exit
-    # code when YURI_AGENTS actually asks for it. Otherwise a user who has
-    # never installed OpenCode would see `yuri doctor` fail over an agent they
-    # do not use.
     agents = [a.strip() for a in (config.YURI_AGENTS or "").split(",") if a.strip()]
     status, detail = _opencode_status()
     if "opencode" in agents:
-        ok &= _line(status != "unavailable", "opencode", detail)
+        out.append(_check("opencode", status != "unavailable", detail))
     else:
         # ✓ is doctor's verdict ("nothing here needs fixing"), not a claim that
         # OpenCode is up — the detail says which it is.
-        _line(True, "opencode", f"{detail} · not in YURI_AGENTS, so nothing needs it")
+        out.append(_check("opencode", True,
+                          f"{detail} · not in YURI_AGENTS, so nothing needs it"))
+    return out
 
+
+def main(argv: list[str]) -> int:
+    print("yuri doctor")
+    rows = checks()
+    for c in rows:
+        print(f"  {'✓' if c.ok else '✗'} {c.name:<14} {c.detail}")
+    ok = all(c.ok for c in rows if c.required)
     print("ok" if ok else "problems found")
     return 0 if ok else 1
 
