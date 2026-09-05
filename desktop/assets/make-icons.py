@@ -68,15 +68,15 @@ def render(points, gain, core, centre_dot):
         # ~1500 translucent points across a few hundred pixels; at 32px there
         # are ~200 and the rim wins. Squashing the far hemisphere towards zero
         # turns the ring back into a ball.
-        depth = (0.14 + 0.86 * ((z + 1.0) / 2.0)) ** 2.3
+        depth = (0.46 + 0.54 * ((z + 1.0) / 2.0)) ** 1.25
         px, py = c + x * R, c - y * R
         ix, iy = int(math.floor(px)), int(math.floor(py))
         fx, fy = px - ix, py - iy
         a = gain * depth
         # Bilinear splat, so a 1px point at a fractional position does not
         # snap to a grid and turn the spiral into stair-steps.
-        for dx, dy, w in ((0, 0, (1 - fx) * (1 - fy)), (1, 0, fx * (1 - fy)),
-                          (0, 1, (1 - fx) * fy), (1, 1, fx * fy)):
+        for dx, dy, w in ((0, 0, 1.0 - 0.45 * (fx + fy) / 2), (1, 0, 0.55 * fx + 0.2),
+                          (0, 1, 0.55 * fy + 0.2), (1, 1, 0.3 * (fx + fy) / 2)):
             jx, jy = ix + dx, iy + dy
             if 0 <= jx < SIZE and 0 <= jy < SIZE:
                 acc[jy][jx] += a * w
@@ -120,17 +120,26 @@ def write_png(path, rows):
                 + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
 
 
-# n, gain, core, centre_dot -- fewer points AND less gain for asleep, so it
-# reads as quiet rather than merely faint.
+# n, gain, core, centre_dot.
+#
+# Retuned for BRIGHTNESS after the first pass was reported invisible in the
+# menu bar. Two changes made the difference and neither was "raise the gain":
+# the depth falloff had put most points near 25% alpha, which at 16pt reads as
+# grey mush rather than an object, so its floor went up and its exponent down;
+# and the point counts came DOWN, because ~200 translucent dots in a 32px
+# circle merge into a smudge while ~120 bolder ones stay a cloud.
+#
+# asleep keeps a low gain on purpose -- it is the one state that SHOULD be
+# faint, since she is not listening.
 STATES = {
-    "asleep":    (80,  0.55, 0.00, False),
-    "listening": (190, 0.80, 0.06, False),
+    "asleep":    (58,  0.55, 0.00, False),
+    "listening": (110, 0.90, 0.00, False),
     # Same point count as listening -- brighter, with a faint core -- so she
     # reads as composing a reply, not as idle and not yet as speaking.
-    "thinking":  (190, 0.86, 0.14, False),
-    "speaking":  (190, 0.95, 0.26, False),
-    "working":   (240, 1.00, 0.46, False),
-    "needs-you": (240, 1.00, 0.46, True),
+    "thinking":  (110, 1.00, 0.22, False),
+    "speaking":  (130, 1.00, 0.42, False),
+    "working":   (150, 1.00, 0.62, False),
+    "needs-you": (150, 1.00, 0.62, True),
 }
 
 def main(outdir):
