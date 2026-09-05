@@ -34,10 +34,12 @@ class Yapcode < Formula
     # Launcher wrapper on PATH. The Cellar is read-only, so this relocates
     # everything the launcher would otherwise write inside the tree:
     #   (1) pins the install tree via YAPCODE_ROOT;
-    #   (2) points config out-of-tree via YAPCODE_CONFIG_DIR — a clone defaults
-    #       config to the in-tree backend/.env, which can't be written under the
-    #       Cellar, so a Homebrew install keeps its .env in ~/.config/yapcode
-    #       (survives brew upgrade / uninstall);
+    #   (2) pins config via YAPCODE_CONFIG_DIR — a clone defaults config to
+    #       $YURI_HOME/config/.env, and a Homebrew install keeps its .env in
+    #       ~/.config/yapcode instead (survives brew upgrade / uninstall).
+    #       Both bin/yapcode's CONF_DIR and setup_store.target_dir() honour
+    #       this variable first, so the wizard, `yapcode config` and the app's
+    #       Setup screen all write the same file here too;
     #   (3) redirects the backend's runtime writes (session store + logs) into
     #       the user's state dir.
     # Each `:=` respects a value the user already set, so overrides still win.

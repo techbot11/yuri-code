@@ -109,11 +109,16 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("search for", str(ctx.exception))
 
     async def test_a_missing_key_says_exactly_what_to_do(self):
+        # It names SETUP, not a .env path. backend/.env -- the file this
+        # message used to name -- is the lowest-precedence source now, below
+        # the file Setup writes, so sending the user there is sending them to
+        # edit something that may have no effect at all.
         with self.assertRaises(SearchUnavailable) as ctx:
             await search("anything", api_key="")
         msg = str(ctx.exception)
         self.assertIn("GEMINI_API_KEY", msg)
-        self.assertIn(".env", msg)
+        self.assertIn("Setup", msg)
+        self.assertNotIn(".env", msg)
 
     async def test_the_upstream_body_is_never_relayed(self):
         # It can carry the key or a long trace, and this text is both spoken

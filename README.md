@@ -235,18 +235,20 @@ brew install python@3.12
 # then create the venv with python3.12 -m venv .venv
 ```
 
-> **One config file.** In a clone the single source of truth is `backend/.env` — the wizard
-> writes it, `yapcode config` edits it, and the backend loads it directly, so there's no second
-> location and no precedence to track. (Only a Homebrew install differs: its read-only Cellar
-> can't hold a writable `backend/.env`, so the wrapper sets `YAPCODE_CONFIG_DIR` and the file
-> lives at `~/.config/yapcode/.env` instead. You can set that same variable in a clone if you'd
-> rather keep config outside the tree.)
+> **One writable config file.** In a clone it is `~/Yuri/config/.env` (`$YURI_HOME/config/.env`)
+> — the wizard writes it, `yapcode config` edits it, and Yuri OS's own **Setup** screen saves to
+> it, so all three routes reach the same file. (Only a Homebrew install differs: its read-only
+> Cellar can't hold a writable in-tree file, so the wrapper sets `YAPCODE_CONFIG_DIR` and the
+> file lives at `~/.config/yapcode/.env` instead. You can set that same variable in a clone if
+> you'd rather keep config elsewhere.) The backend also still loads a pre-existing
+> `backend/.env`, **last** and so lowest-precedence; nothing writes it any more, and the wizard
+> copies one it finds into the writable location on first run.
 
 ### First-run setup wizard
 
 The first time you run any subcommand (`up` / `session` / `config`) with no config present, a
-wizard runs and writes the config file (created `0600`, `umask 077`) — `backend/.env` from a
-clone, or `~/.config/yapcode/.env` on a Homebrew install. It prompts for:
+wizard runs and writes the config file (created `0600`, `umask 077`) — `~/Yuri/config/.env` from
+a clone, or `~/.config/yapcode/.env` on a Homebrew install. It prompts for:
 
 1. **Gemini API key** — optional (free tier at <https://aistudio.google.com/apikey>), Enter to skip.
 2. **OpenAI key** (`sk-...`) — optional, Enter to skip.
@@ -268,7 +270,7 @@ anything, edit the file or run `yapcode config`.
 | --- | --- |
 | `yapcode up` *(default)* | Runs the wizard if needed, bootstraps deps, starts backend (`:8000`) + frontend (`:3000`), opens the app. Ctrl-C stops both. |
 | `yapcode session [dir]` | Starts and attaches a voice-ready Claude session in `dir`. |
-| `yapcode config` | Opens the config file (`backend/.env`, or `~/.config/yapcode/.env` on Homebrew) in `$EDITOR` (falls back to `open`). |
+| `yapcode config` | Opens the config file (`~/Yuri/config/.env`, or `~/.config/yapcode/.env` on Homebrew) in `$EDITOR` (falls back to `open`). Same file the app's Setup screen writes. |
 
 `yapcode -h` / `--help` prints `usage: yapcode {up|session [dir]|config}`. An unknown
 subcommand prints usage to stderr and exits `2`.
@@ -331,7 +333,7 @@ config; it applies only when `run-network.sh` exports it. Open <http://localhost
 Network mode binds `0.0.0.0` over HTTPS/WSS and **fails closed without a `VC_AUTH_TOKEN`**.
 
 ```bash
-# Terminal 1 — backend over TLS on https://0.0.0.0:8000 (needs VC_AUTH_TOKEN in backend/.env)
+# Terminal 1 — backend over TLS on https://0.0.0.0:8000 (needs VC_AUTH_TOKEN in your config file)
 cd backend && ./run-network.sh
 
 # Terminal 2 — frontend over TLS on https://0.0.0.0:3000
@@ -455,10 +457,14 @@ WSL gotchas:
 
 ## Configuration reference
 
-Config lives at **`backend/.env`** (chmod `600`) — one file, loaded directly by the backend, with
-no second location and no precedence to track. A **Homebrew** install instead uses
-**`~/.config/yapcode/.env`** (its wrapper sets `YAPCODE_CONFIG_DIR`, since the Cellar is
-read-only); set `YAPCODE_CONFIG_DIR` yourself to keep a clone's config out of the tree too.
+Config lives at **`~/Yuri/config/.env`** (`$YURI_HOME/config/.env`, chmod `600`) — the one
+writable file, shared by the wizard, `yapcode config` and the app's **Setup** screen. A
+**Homebrew** install instead uses **`~/.config/yapcode/.env`** (its wrapper sets
+`YAPCODE_CONFIG_DIR`, since the Cellar is read-only); set `YAPCODE_CONFIG_DIR` yourself to keep a
+clone's config elsewhere. The backend reads, in precedence order: the real process environment,
+then `$YAPCODE_CONFIG_DIR/.env` (Homebrew only), then `$YURI_HOME/config/.env`, then a
+pre-existing `backend/.env` **last** — each file only filling what the ones before it left unset.
+Nothing writes `backend/.env` any more; the wizard copies one it finds into the writable location.
 Runtime state (logs, tmux store) lives under `<project>/.yapcode/` from a clone, or
 **`~/.local/state/yapcode`** on Homebrew (override base via `XDG_STATE_HOME` / `VC_SESSION_STORE`);
 the Homebrew config + state survive `brew upgrade` and uninstall.
@@ -613,14 +619,14 @@ More detail in the [plugin README](integrations/claude-code-plugin/README.md).
 | `brew install` refuses: `Refusing to load formula … from untrusted tap` | Newer Homebrew gates **all third-party taps** until trusted once (supply-chain protection — not a warning about this tap specifically). Run `brew trust nithiink/yapcode`, then `brew install yapcode`. |
 | `pip` fails: `No matching distribution found for claude-agent-sdk==…` | **Python is too old** — must be **3.12+**. macOS: `brew install python@3.12` and build the venv with `python3.12`. Ubuntu: upgrade to 24.04 (20.04 ships 3.8, 22.04 ships 3.10). |
 | `start_session` refuses / "no allowed roots" | `ALLOWED_PROJECT_ROOTS` is unset — the sandbox fails closed by design. Set it to existing folders (not `/`, `$HOME`, or empty). |
-| `run-network.sh` exits `1` immediately | Network mode **fails closed without `VC_AUTH_TOKEN`** in `backend/.env`. Generate one and set it, then open the app once with `/#vc_token=<token>`. |
+| `run-network.sh` exits `1` immediately | Network mode **fails closed without `VC_AUTH_TOKEN`** in your config file (`~/Yuri/config/.env`). `yapcode up` generates one; otherwise set it by hand, then open the app once with `/#vc_token=<token>`. |
 | `yapcode up` exits `1` on startup | **Port 8000 or 3000 is already in use.** Free the port and retry. |
 | Live terminal connects but stays blank / silently fails (LAN/phone) | You skipped the one-time self-signed-cert accept at `https://<host>:8000`, so the `wss` terminal is blocked. Visit it once and accept. Also: an HTTPS page must use `wss` (no mixed content). |
 | Mic doesn't work on phone | `getUserMedia` needs a secure context. Use `npm run dev:network` (HTTPS on `0.0.0.0`); plain `npm run dev` is HTTP + loopback-only. The device's IP must be in the cert SANs (`frontend/.certs/san.cnf`, copied from `san.cnf.example`); regenerate the cert for a new IP. |
 | App loads on a phone but toggles/buttons appear dead | Your LAN IP is outside the `192.168` / `10` / `172.16` private ranges, so Next 16 blocked `/_next/*` assets. Add the specific origin to `allowedDevOrigins` in `frontend/next.config.mjs`. |
 | Voice model select is greyed out | The model is **locked while connected** — disconnect first to change it. |
 | Token I set in config has no effect on localhost | Intentional: the backend **never auto-loads `VC_AUTH_TOKEN` from a `.env` file** (opt-in per run mode), so localhost stays zero-config. It applies only in network mode, where `run-network.sh` exports it. |
-| Config changes don't take effect | There's one config file — `backend/.env` (or `~/.config/yapcode/.env` on Homebrew). Edit it (or run `yapcode config`) and restart. Make sure you don't also have stale values exported in your shell, which win over the file. |
+| Config changes don't take effect | The writable config file is `~/Yuri/config/.env` (or `~/.config/yapcode/.env` on Homebrew). Edit it (or run `yapcode config`, or use the app's Setup screen) and restart. A `backend/.env` is read **last**, so editing that one has no effect on anything the other two set. Make sure you don't also have stale values exported in your shell, which win over every file — Setup flags this on the field when it happens. |
 | First page load is slow | Without a production build (`frontend/.next/BUILD_ID`), the launcher runs `npm run dev`, which compiles the UI on first load. A `next build` produces the `BUILD_ID` and switches it to `npm run start`. |
 | Sessions vanished after restart | yapcode can run Claude two ways — the default interactive **CLI** backend or the Agent **SDK** backend (see [Architecture](#architecture-for-contributors)). Only the CLI backend rehydrates detached tmux sessions on restart; SDK subprocesses die with the backend. Set `VC_KILL_SESSIONS_ON_SHUTDOWN=1` to kill on shutdown instead. |
 | `brew install yapcode` can't find the formula | Tap it first: `brew tap nithiink/yapcode`, then `brew install yapcode`. If a fetch fails, `brew update` and retry; you can always fall back to the [clone install](#install-from-source). |

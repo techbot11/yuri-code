@@ -86,10 +86,13 @@ class GeminiEmbedder:
 
     async def embed(self, texts: list[str]) -> list[bytes]:
         if not self._key:
+            # Names Setup, not backend/.env: that file is the lowest-
+            # precedence source now, so pointing a user at it can send them
+            # to edit something that has no effect.
             raise EmbeddingUnavailable(
-                "I can't search my memory by meaning — GEMINI_API_KEY isn't set in "
-                "backend/.env. Everything I remember is still there and still findable "
-                "by project or by date.")
+                "I can't search my memory by meaning — GEMINI_API_KEY isn't set. "
+                "Add it under Setup. Everything I remember is still there and still "
+                "findable by project or by date.")
         if not texts:
             return []
         one = len(texts) == 1

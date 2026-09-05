@@ -130,9 +130,13 @@ async def search(query: str, *, api_key: str | None = None,
 
     key = (api_key if api_key is not None else os.getenv("GEMINI_API_KEY", "")).strip()
     if not key:
+        # Names Setup, not a file: backend/.env is the LOWEST-precedence
+        # source now (below the file Setup writes), so telling the user to
+        # edit it is telling them to do something that may have no effect.
+        # Same correction as session_manager's no-allowed-roots message.
         raise SearchUnavailable(
-            "I can't search — GEMINI_API_KEY isn't set in backend/.env. "
-            "Add it and restart the backend.")
+            "I can't search — GEMINI_API_KEY isn't set. Add it under Setup "
+            "and restart the backend.")
 
     body = {
         "contents": [{"parts": [{"text": q}]}],

@@ -90,13 +90,17 @@ class FakeEmbedderTests(unittest.IsolatedAsyncioTestCase):
 
 class GeminiEmbedderTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_missing_key_raises_the_named_type_with_an_actionable_message(self):
-        # Mirrors own/search.py: "GEMINI_API_KEY isn't set in backend/.env" is
-        # something the user can act on; "embedding failed" is not.
+        # Mirrors own/search.py: naming the key and where to put it is
+        # something the user can act on; "embedding failed" is not. It points
+        # at SETUP rather than backend/.env, which is the lowest-precedence
+        # source now -- sending someone to edit a file that loses to the one
+        # Setup writes is worse than saying nothing.
         with self.assertRaises(EmbeddingUnavailable) as ctx:
             await GeminiEmbedder(api_key="").embed(["anything"])
         msg = str(ctx.exception)
         self.assertIn("GEMINI_API_KEY", msg)
-        self.assertIn("backend/.env", msg)
+        self.assertIn("Setup", msg)
+        self.assertNotIn("backend/.env", msg)
         # And it says what still works, so she does not report total failure.
         self.assertIn("still findable", msg)
 
