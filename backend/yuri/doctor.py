@@ -151,7 +151,10 @@ def main(argv: list[str]) -> int:
     rows = checks()
     for c in rows:
         print(f"  {'✓' if c.ok else '✗'} {c.name:<14} {c.detail}")
-    ok = all(c.ok for c in rows if c.required)
+    # Every check, not just the required ones: REQUIRED_CHECKS decides what
+    # gates the UI (spec §6.2), while `yuri doctor` exists to report anything
+    # wrong. A doctor that says "ok" with tmux missing is a worse tool.
+    ok = all(c.ok for c in rows)
     print("ok" if ok else "problems found")
     return 0 if ok else 1
 

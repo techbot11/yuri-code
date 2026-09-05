@@ -71,10 +71,7 @@ class Doctor(unittest.TestCase):
                 code = doctor.main([])
             line = next(l for l in buf.getvalue().splitlines() if "allowed roots" in l)
             self.assertIn("✗", line)
-            # "allowed roots" is not in REQUIRED_CHECKS: it is still flagged
-            # (✗ above), but it no longer fails `yuri doctor`'s exit code —
-            # only home/database/claude/voice keys do.
-            self.assertEqual(code, 0)
+            self.assertEqual(code, 1)
 
     def test_allowed_roots_ok_when_a_real_project_root_is_configured(self):
         with tempfile.TemporaryDirectory() as d, \
@@ -111,26 +108,25 @@ class Doctor(unittest.TestCase):
         self.assertNotIn("tmux", doctor.REQUIRED_CHECKS)
         self.assertNotIn("opencode", doctor.REQUIRED_CHECKS)
 
-    def test_main_agrees_with_checks_on_the_verdict(self):
-        # The CLI and the API must never disagree about whether things are ok.
+    def test_main_reports_every_failure_but_required_gates_the_app(self):
+        # Two different questions with two different answers: the CLI's exit
+        # code is "is anything wrong", REQUIRED_CHECKS is "is Yuri usable".
         with tempfile.TemporaryDirectory() as d, \
              mock.patch.object(config, "YURI_HOME", os.path.join(d, "Yuri")):
             rows = doctor.checks()
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = doctor.main([])
-        required_ok = all(c.ok for c in rows if c.required)
-        self.assertEqual(rc == 0, required_ok)
+        self.assertEqual(rc == 0, all(c.ok for c in rows),
+                         "the CLI must report ANY failure")
         for c in rows:
             self.assertIn(c.name, buf.getvalue())
 
 
 class OpenCodeCheck(unittest.TestCase):
-    """OpenCode is OPTIONAL — it is never in REQUIRED_CHECKS. It gets a line
-    either way, and that line's ✓/✗ still reflects whether YURI_AGENTS asks
-    for it, but neither outcome gates `yuri doctor`'s exit code: a user who
-    has never installed OpenCode (or who has it configured but unreachable)
-    still gets exit 0 from the checks that matter."""
+    """OpenCode is OPTIONAL. It gets a line either way, but it only gates the
+    exit code when YURI_AGENTS actually asks for it — otherwise a user who has
+    never installed OpenCode would see `yuri doctor` fail."""
 
     def _doctor(self, *, agents="claude-code,opencode", url=None,
                 which=lambda n: "/usr/bin/" + n, **cfg) -> tuple[int, str]:
@@ -173,15 +169,13 @@ class OpenCodeCheck(unittest.TestCase):
         self.assertIn("/usr/bin/opencode", line)
         self.assertEqual(code, 0, "a spawnable OpenCode is not a problem")
 
-    def test_no_binary_and_nothing_running_is_flagged_when_yuri_agents_asks_for_it(self):
+    def test_no_binary_and_nothing_running_fails_when_yuri_agents_asks_for_it(self):
         code, out = self._doctor(which=lambda n: None if n == "opencode"
                                  else "/usr/bin/" + n)
         line = self._opencode_line(out)
         self.assertIn("unavailable", line)
         self.assertIn("✗", line)
-        # opencode is not in REQUIRED_CHECKS, so even a ✗ here — with
-        # YURI_AGENTS asking for it — does not fail `yuri doctor`'s exit code.
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 1)
 
     def test_the_same_unavailable_opencode_is_informational_when_it_is_not_asked_for(self):
         code, out = self._doctor(agents="claude-code",
@@ -200,9 +194,7 @@ class OpenCodeCheck(unittest.TestCase):
         line = self._opencode_line(out)
         self.assertIn("unavailable", line)
         self.assertIn("OPENCODE_SPAWN", line)
-        # Flagged (unavailable, above) but not required, so it doesn't fail
-        # the exit code.
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 1)
 
     def test_the_server_password_is_used_but_never_printed(self):
         """It authenticates the probe (a secured server must read as attached,
