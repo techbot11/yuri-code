@@ -195,8 +195,12 @@ MANAGED_KEYS: tuple[ManagedKey, ...] = (
 )
 
 
-def _strip_url_userinfo(value: str) -> str:
-    """`https://user:token@gw/x` -> `https://***@gw/x`. A non-secret setting
+def strip_url_userinfo(value: str) -> str:
+    """`https://user:token@gw/x` -> `https://***@gw/x`.
+
+    Public because `yuri.doctor` needs it too: OPENCODE_URL is interpolated
+    into detail strings that GET /yuri/doctor returns verbatim, and a password
+    written into a URL is a credential wherever it appears. A non-secret setting
     (a base URL) can still carry a credential in its userinfo -- masking the
     key but not this would let one straight through GET /yuri/config, which
     this whole module promises never returns a secret value. Anything that
@@ -223,12 +227,12 @@ def masked_hint(value: str, *, secret: bool = True) -> str:
     secrets get no hint at all. Non-secrets (a URL, a model name) are
     configuration rather than credentials, so masking them would make the UI
     useless -- except a URL's userinfo, which IS a credential regardless of
-    which field carries it; see `_strip_url_userinfo`."""
+    which field carries it; see `strip_url_userinfo`."""
     value = (value or "").strip()
     if not value:
         return ""
     if not secret:
-        return _strip_url_userinfo(value)
+        return strip_url_userinfo(value)
     return f"…{value[-4:]}" if len(value) > 8 else "set"
 
 
@@ -449,6 +453,30 @@ ALLOWED_ORIGIN_REGEX: str | None = (
     _DEFAULT_ORIGIN_REGEX if _origin_regex_raw is None else (_origin_regex_raw.strip() or None)
 )
 _ORIGIN_RE = re.compile(ALLOWED_ORIGIN_REGEX) if ALLOWED_ORIGIN_REGEX else None
+
+
+def exact_origin_allowed(origin: str | None) -> bool:
+    """Whether `origin` is one of the EXACT origins in ALLOWED_ORIGINS —
+    ALLOWED_ORIGIN_REGEX is deliberately not consulted.
+
+    For the credential-writing endpoints (GET/PUT /yuri/config, GET
+    /yuri/doctor) `origin_allowed` is too loose to be a boundary: its default
+    regex fullmatches loopback and every private-LAN address on ANY port, so
+    a page served from any other local port would satisfy it. That looseness
+    is fine for the read-mostly, token-guarded browser-direct transports it
+    was written for; it is not fine for a route that persists a value into the
+    `.env` read at every boot (an attacker-controlled ANTHROPIC_BASE_URL sends
+    the user's real Anthropic credential to their host) or widens
+    ALLOWED_PROJECT_ROOTS with effect "now".
+
+    A legitimate browser request never has to satisfy this, because it never
+    carries an Origin at all: every REST call goes through the same-origin
+    Next proxy (frontend/lib/api.ts), which deliberately does not forward
+    Origin (frontend/lib/proxyAuth.ts) and rejects cross-site requests itself
+    via Sec-Fetch-Site. That holds for a LAN phone too — the phone talks to
+    Next, Next talks to the backend server-side. So the callers this list has
+    to admit are the ones configured explicitly with VC_ALLOWED_ORIGINS."""
+    return bool(origin) and origin in ALLOWED_ORIGINS
 
 
 def origin_allowed(origin: str | None) -> bool:

@@ -58,6 +58,43 @@ def _by(request: Request) -> str:
     return "ui" if request.headers.get("origin") else "api"
 
 
+async def require_strict_origin(request: Request) -> None:
+    """Extra gate for the Setup routes, ON TOP OF the router's require_auth.
+
+    require_auth judges an Origin with `config.origin_allowed`, whose default
+    regex admits loopback and every private-LAN address on ANY port — so
+    before this branch existed, "some other page on some other local port"
+    was an acceptable caller of every route. That was survivable while no
+    endpoint could write a credential. PUT /yuri/config can: it persists into
+    the `.env` read at every boot, so `{"ANTHROPIC_BASE_URL": "https://attacker/"}`
+    makes the next agent session hand over the user's real Anthropic
+    credential, and `{"ALLOWED_PROJECT_ROOTS": "/"}` widens the filesystem
+    sandbox immediately (effect "now") and permanently.
+
+    So here: no Origin at all, or an Origin in the exact
+    `config.ALLOWED_ORIGINS` list. The LAN regex is not consulted — see
+    `config.exact_origin_allowed` for why that costs no legitimate caller
+    anything. Composes with require_auth rather than replacing it: the token /
+    loopback decision is still that function's, and this only narrows which
+    browser origins reach these three routes.
+
+    An absent Origin is treated as absent the same way require_auth treats it
+    (`if origin and ...`): page JS cannot set or blank the Origin header — it
+    is a forbidden header — so "no Origin" is proof of a non-browser or
+    proxied caller, not something a hostile page can arrange.
+    """
+    origin = request.headers.get("origin")
+    if origin and not config.exact_origin_allowed(origin):
+        # Names no value and no key: this fires before the body is read.
+        raise HTTPException(status_code=403,
+                            detail="origin not allowed for a setup endpoint")
+
+
+# Applied to GET /yuri/doctor and GET/PUT /yuri/config. Named so a test can
+# assert the three routes carry it, rather than trusting it stayed attached.
+SETUP_ROUTE_GUARD = Depends(require_strict_origin)
+
+
 def build_router(require_auth: Callable) -> APIRouter:
     r = APIRouter(prefix="/yuri", dependencies=[Depends(require_auth)])
 
@@ -345,7 +382,7 @@ def build_router(require_auth: Callable) -> APIRouter:
                            "specialists": by_role.get(role, [])} for role in ROLES],
                 "capabilities": list(TASK_CAPABILITIES)}
 
-    @r.get("/doctor")
+    @r.get("/doctor", dependencies=[SETUP_ROUTE_GUARD])
     async def read_doctor():
         """The same checks `yuri doctor` prints, as data — one implementation,
         so the CLI and the Setup screen cannot disagree. `ok` counts only the
@@ -356,7 +393,7 @@ def build_router(require_auth: Callable) -> APIRouter:
                             "required": c.required} for c in rows],
                 "ok": all(c.ok for c in rows if c.required)}
 
-    @r.get("/config")
+    @r.get("/config", dependencies=[SETUP_ROUTE_GUARD])
     async def read_config():
         """Managed settings: presence, a masked hint, provenance, and what a
         change takes effect on. NEVER a value."""
@@ -364,7 +401,7 @@ def build_router(require_auth: Callable) -> APIRouter:
                 "path": setup_store.target_dir().replace(
                     os.path.expanduser("~"), "~", 1)}
 
-    @r.put("/config")
+    @r.put("/config", dependencies=[SETUP_ROUTE_GUARD])
     async def write_config(body: ConfigUpdate):
         """Write managed settings, to the file AND to this process.
 

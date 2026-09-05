@@ -28,8 +28,13 @@ class _Harness(unittest.TestCase):
     API test here (see tests/test_phase7_api.py:29-55). Importing the real app
     would boot the real container against the developer's own YURI_HOME."""
 
+    #: Every route this suite is about. The auth-gate test asserts all three
+    #: are in the router's table, so a rename cannot quietly empty the loop.
+    SETUP_ROUTES = (("GET", "/yuri/doctor"), ("GET", "/yuri/config"),
+                    ("PUT", "/yuri/config"))
+
     def setUp(self):
-        from fastapi import FastAPI
+        from fastapi import FastAPI, HTTPException
         from fastapi.testclient import TestClient
         from yuri import app as yapp
         from yuri.api.routes import build_router
@@ -46,10 +51,14 @@ class _Harness(unittest.TestCase):
         self.addCleanup(lambda: [p.stop() for p in self.patches])
         self.c = yapp.test_container(home, FakeAgentProvider())
 
+        self.denied = False
+
         async def guard():
-            return None
+            if self.denied:
+                raise HTTPException(status_code=401, detail="nope")
+        self.router = build_router(guard)
         app = FastAPI()
-        app.include_router(build_router(guard))
+        app.include_router(self.router)
         self.client = TestClient(app)
         self.addCleanup(self.client.close)
 
@@ -246,6 +255,98 @@ class ConfigWrite(_Harness):
         self.assertFalse(resolved.get("OPENAI_API_KEY"))
         with open(env_path) as f:
             self.assertNotIn("old-leaked-key", f.read())
+
+
+class SetupRouteAccess(_Harness):
+    """Who may reach the three Setup routes at all.
+
+    Everything else in this file drives them through a no-op guard, which is
+    exactly why these two guarantees needed pinning: with the guard stubbed
+    out, "the routes are protected" was a structural claim nothing tested."""
+
+    def test_the_auth_dependency_applies_to_all_three_routes(self):
+        # Enumerated from the router's own table rather than a hardcoded list,
+        # and cross-checked against SETUP_ROUTES so a rename shows up as a
+        # failure instead of an empty loop.
+        table = {(m, rt.path) for rt in self.router.routes
+                 for m in (rt.methods or set()) - {"HEAD", "OPTIONS"}}
+        for method, path in self.SETUP_ROUTES:
+            self.assertIn((method, path), table, f"{method} {path} is not routed")
+        self.denied = True
+        for method, path in self.SETUP_ROUTES:
+            with self.subTest(route=f"{method} {path}"):
+                r = self.client.request(method, path, json={"values": {}})
+                self.assertEqual(r.status_code, 401, r.text)
+
+    def test_no_origin_passes(self):
+        """The legitimate case, and the ONLY one a browser produces: every REST
+        call goes through the same-origin Next proxy (frontend/lib/api.ts),
+        which deliberately does not forward Origin (frontend/lib/proxyAuth.ts)
+        and rejects cross-site requests itself. That includes a LAN phone --
+        the phone talks to Next, Next talks to the backend server-side."""
+        self.assertEqual(self.client.get("/yuri/doctor").status_code, 200)
+        self.assertEqual(self.client.get("/yuri/config").status_code, 200)
+
+    def test_an_exactly_allowed_origin_passes(self):
+        origin = config.ALLOWED_ORIGINS[0]
+        for method, path in self.SETUP_ROUTES:
+            with self.subTest(route=f"{method} {path}"), \
+                 mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+                 mock.patch.dict(os.environ, {}, clear=False):
+                r = self.client.request(method, path, headers={"Origin": origin},
+                                        json={"values": {}})
+                self.assertEqual(r.status_code, 200, r.text)
+
+    def test_another_localhost_port_is_refused(self):
+        """The whole point. `config.origin_allowed` -- what require_auth uses
+        -- ADMITS this origin, because its default regex fullmatches loopback
+        on any port. That was survivable while no endpoint could write a
+        credential; PUT /yuri/config can, and it persists into the .env read
+        at every boot. So a page on any other local port could have pointed
+        ANTHROPIC_BASE_URL at its own host and collected the user's real
+        Anthropic credential from the next agent session."""
+        self.assertTrue(config.origin_allowed("http://localhost:9999"),
+                        "the broad allowlist must still admit this, or this "
+                        "test is not about the narrower rule")
+        for method, path in self.SETUP_ROUTES:
+            with self.subTest(route=f"{method} {path}"):
+                r = self.client.request(method, path,
+                                        headers={"Origin": "http://localhost:9999"},
+                                        json={"values": {"ANTHROPIC_BASE_URL":
+                                                         "https://attacker.example/"}})
+                self.assertEqual(r.status_code, 403, r.text)
+
+    def test_a_private_lan_origin_is_refused(self):
+        """A LAN phone reaching the backend through the Next proxy sends no
+        Origin at all, so refusing LAN origins here costs a real user nothing
+        -- while the regex that admits them would otherwise let any page on
+        any device on the network write a credential."""
+        self.assertTrue(config.origin_allowed("http://192.168.1.50:3000"))
+        for method, path in self.SETUP_ROUTES:
+            with self.subTest(route=f"{method} {path}"):
+                r = self.client.request(method, path,
+                                        headers={"Origin": "http://192.168.1.50:3000"},
+                                        json={"values": {"ALLOWED_PROJECT_ROOTS": "/"}})
+                self.assertEqual(r.status_code, 403, r.text)
+
+    def test_a_refused_origin_writes_nothing_and_changes_nothing(self):
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ANTHROPIC_BASE_URL", None)
+            r = self.client.put("/yuri/config",
+                                headers={"Origin": "http://localhost:9999"},
+                                json={"values": {"ANTHROPIC_BASE_URL":
+                                                 "https://attacker.example/"}})
+            self.assertEqual(r.status_code, 403)
+            self.assertIsNone(os.environ.get("ANTHROPIC_BASE_URL"))
+        self.assertFalse(os.path.isfile(os.path.join(self.tmp.name, ".env")))
+
+    def test_the_refusal_names_no_value(self):
+        r = self.client.put("/yuri/config",
+                            headers={"Origin": "http://localhost:9999"},
+                            json={"values": {"GEMINI_API_KEY": SECRET}})
+        self.assertEqual(r.status_code, 403)
+        self.assertNotIn(SECRET, r.text)
 
 
 class StoreDirectly(unittest.TestCase):

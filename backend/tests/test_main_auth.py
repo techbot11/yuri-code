@@ -62,6 +62,35 @@ class OriginAllowed(unittest.TestCase):
         self.assertFalse(config.origin_allowed(""))
 
 
+class ExactOriginAllowed(unittest.TestCase):
+    """The narrower rule the credential-writing Setup routes use. Deliberately
+    does NOT consult ALLOWED_ORIGIN_REGEX: that regex admits loopback and
+    every private-LAN address on ANY port, which is a convenience for
+    legitimate same-network devices rather than a boundary -- and a route that
+    persists a value into the .env read at every boot needs a boundary."""
+
+    def test_an_exact_configured_origin_passes(self):
+        for origin in config.ALLOWED_ORIGINS:
+            self.assertTrue(config.exact_origin_allowed(origin), origin)
+
+    def test_the_lan_regex_is_not_consulted(self):
+        for origin in ("http://localhost:9999", "http://192.168.1.50:3000",
+                       "http://10.0.0.4:8080", "http://127.0.0.1:5173"):
+            # Both halves, so this test fails if either rule drifts into the
+            # other: the broad rule must still admit these, and the exact one
+            # must not.
+            self.assertTrue(config.origin_allowed(origin), origin)
+            self.assertFalse(config.exact_origin_allowed(origin), origin)
+
+    def test_empty_and_null_rejected(self):
+        # "null" is what a browser sends from an opaque origin (a sandboxed
+        # iframe, a data: URL) -- it is a string, not an absence, so it has to
+        # be refused rather than mistaken for "no Origin".
+        self.assertFalse(config.exact_origin_allowed(None))
+        self.assertFalse(config.exact_origin_allowed(""))
+        self.assertFalse(config.exact_origin_allowed("null"))
+
+
 class DegradedBoot(unittest.TestCase):
     """An ~/Yuri that exists as a FILE, or an unwritable home, must not take the
     whole voice app down — only bad config could stop the boot before this
