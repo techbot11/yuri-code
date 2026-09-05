@@ -2,12 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { FORM_ROUTES, TABS, activeTab, showsTabs } from "./agentsTabs.ts";
 
-test("there are three tabs and each says what it holds", () => {
+test("there are three tabs, each labelled and rooted under /agents", () => {
   assert.equal(TABS.length, 3);
   for (const t of TABS) {
     assert.ok(t.href.startsWith("/agents"), t.href);
     assert.ok(t.label.length > 3, t.label);
-    assert.ok(t.blurb.length > 15, `${t.label} does not say what it holds`);
   }
 });
 

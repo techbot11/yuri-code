@@ -58,8 +58,9 @@ export function McpServers() {
   };
 
   return (
-    <section className="mcp">
+    <section>
       <div className="mcp-head">
+        <h3 className="sectitle">MCP Connector</h3>
         {rows && (
           <button className="txtoggle" onClick={() => router.push("/agents/services/new")}>
             Add a service

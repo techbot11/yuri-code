@@ -6,22 +6,19 @@
 // and belongs to Agents; `/agents/services/new` is the MCP form and belongs
 // to Connected services.
 
-export type Tab = { href: string; label: string; blurb: string };
+export type Tab = { href: string; label: string };
 
 /** Order is the order they render. Agents first because it is what the panel
  *  is named for; engines and services are what run and extend them. */
 export const TABS: Tab[] = [
   {
-    href: "/agents", label: "Your agents",
-    blurb: "Specialists Yuri hands work to."
+    href: "/agents", label: "Your agents"
   },
   {
-    href: "/agents/engines", label: "Engines",
-    blurb: "The runtimes your agents run on."
+    href: "/agents/engines", label: "Engines"
   },
   {
-    href: "/agents/services", label: "MCP Connector",
-    blurb: "Tools Yuri can use herself, from MCP servers you add."
+    href: "/agents/services", label: "MCP Connector"
   },
 ];
 

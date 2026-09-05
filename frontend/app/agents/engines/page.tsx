@@ -54,7 +54,14 @@ export default function Page() {
 
   return (
     <section className="engines-view">
-      <p className="mcp-blurb">The runtimes your agents run on.</p>
+      <div className="mcp-head">
+        <h3 className="sectitle">Engines</h3>
+      </div>
+      <p className="mcp-blurb">
+        The runtimes your agents run on. These come with Yuri rather than being
+        added here — an agent picks one, and what the engine can do decides what
+        that agent can be asked for.
+      </p>
       {loadError ? (
         <ViewError error={loadError} onRetry={() => void load()} />
       ) : agents.length === 0 ? (
