@@ -325,6 +325,28 @@ def _text_of(message: dict[str, Any]) -> str:
     return "".join(parts)
 
 
+def _turn_error(finished: list[dict[str, Any]]) -> str | None:
+    """The reason a turn ended badly, or None if it ended well.
+
+    Reads BOTH signals the server sends — `finish: "error"` and an `error`
+    object — because either alone would miss a shape the other covers, and
+    the cost of missing one is a failed agent reported as a successful one.
+    """
+    for m in finished:
+        err = m.get("error")
+        if isinstance(err, dict):
+            message = " ".join(str(err.get("message") or "").split())
+            kind = str(err.get("type") or "").strip()
+            return message or (f"the agent failed ({kind})" if kind else "the agent failed")
+        if err:
+            return " ".join(str(err).split())
+        if str(m.get("finish") or "").lower() == "error":
+            # Flagged as an error with nothing to say about it. Still an
+            # error: silence is not success.
+            return "the agent's turn ended in an error it did not describe"
+    return None
+
+
 def _assistant_text(messages: list[dict[str, Any]]) -> str:
     return "".join(_text_of(m) for m in messages if m.get("type") == "assistant")
 
@@ -821,9 +843,20 @@ class OpenCodeProvider(AgentProvider):
             return {**out, "status": "idle"}
 
         fresh = messages[h.msg_seen:]
-        if any(m.get("type") == "assistant" and m.get("finish") for m in fresh):
+        finished = [m for m in fresh if m.get("type") == "assistant" and m.get("finish")]
+        if finished:
             h.in_flight = False
             h.msg_seen = len(messages)
+            # A turn can FINISH BADLY, and `finish` is truthy either way — it
+            # is "error" on a failure. Reporting that as `completed` made a
+            # crashed agent indistinguishable from a successful one: observed
+            # live, where a flaky free model returned
+            # `{"finish": "error", "error": {...}, "content": []}` twice and
+            # both workflow tasks completed having changed nothing, because a
+            # task without a declared check has only the agent's word.
+            failure = _turn_error(finished)
+            if failure:
+                return {**out, "status": "error", "error": failure}
             return {**out, "status": "completed",
                     "assistant_text": _assistant_text(fresh)[:MAX_ASSISTANT_TEXT]}
 

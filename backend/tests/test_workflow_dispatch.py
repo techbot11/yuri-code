@@ -567,3 +567,91 @@ class PollOnlyProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stop_is_safe_when_it_never_started(self):
         await self.c.dispatcher.stop()      # no exception
+
+
+class AVanishedAgentTests(unittest.IsolatedAsyncioTestCase):
+    """A task waiting on an agent that no longer exists is waiting forever.
+
+    The other half of the poll-only gap, and it bites the PUSHING provider.
+    Claude Code emits events, so it is excluded from polling — but a dead tmux
+    session emits nothing either, and reconcile() only looks at startup.
+
+    Observed in the Phase 7 live run: a tmux session Yuri started died seconds
+    later and its task sat at `dispatched` for ten minutes with nothing
+    noticing.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.mkdir(os.path.join(self.tmp.name, "proj"))
+        self.patches = [
+            mock.patch.dict(os.environ, {"ALLOWED_PROJECT_ROOTS": self.tmp.name}),
+            mock.patch.object(config, "YURI_HOME", os.path.join(self.tmp.name, "Yuri")),
+        ]
+        [p.start() for p in self.patches]
+        self.fake = FakeAgentProvider(supports_events=True)     # a PUSHING provider
+        self.c = yapp.test_container(os.path.join(self.tmp.name, "Yuri"), self.fake)
+        self.project = self.c.projects.resolve_or_create("proj")
+        self.mission = self.c.missions.create(self.project, "m", created_by="voice", goal="g")
+        self.addCleanup(self.tmp.cleanup)
+
+    def tearDown(self):
+        yapp.set_container(None)
+        self.c.store.close()
+        [p.stop() for p in self.patches]
+
+    async def _dispatched(self):
+        w = await self.c.workflow.create(self.mission, "single", goal="fix it")
+        await self.c.workflow.resume(w.id)
+        await self.c.workflow.advance(w.id)
+        [t] = self.c.workflow.tasks_of(w.id)
+        self.assertEqual(t.status, "dispatched")
+        return w, t
+
+    async def test_a_live_agent_is_left_alone(self):
+        _, t = await self._dispatched()
+        self.assertEqual(await self.c.dispatcher._fail_vanished(), 0)
+        self.assertEqual(self.c.workflow.get_task(t.id).status, "dispatched")
+
+    async def test_a_vanished_agent_fails_the_task_with_a_reason(self):
+        # max_attempts=1 so the failure is terminal: otherwise the retry
+        # policy re-dispatches immediately and the retry's OWN failure
+        # overwrites the reason, which is what the first version of this test
+        # tripped over.
+        _, t = await self._dispatched()
+        t.max_attempts = 1
+        self.c.store.tasks.update(t)
+        self.fake.sessions.clear()                # the process is gone
+        self.assertEqual(await self.c.dispatcher._fail_vanished(), 1)
+        after = self.c.workflow.get_task(t.id)
+        self.assertIn(after.status, ("failed", "blocked"))
+        self.assertIn("disappeared", after.error or "")
+        self.assertIn("retry it", after.error or "")
+
+    async def test_a_vanished_agent_is_retried_when_it_can_be(self):
+        # The useful behaviour: a fresh agent, not a dead mission.
+        _, t = await self._dispatched()
+        first_session = t.session_id
+        self.fake.sessions.clear()
+        await self.c.dispatcher._fail_vanished()
+        after = self.c.workflow.get_task(t.id)
+        self.assertEqual(after.attempts, 2, "it did not try again")
+        self.assertNotEqual(after.session_id, first_session)
+
+    async def test_a_provider_that_cannot_be_enumerated_is_not_treated_as_empty(self):
+        # Could-not-ask and it-is-gone are different, and failing a live task
+        # on an unreachable provider is worse than waiting for it.
+        _, t = await self._dispatched()
+
+        def boom():
+            raise RuntimeError("unreachable")
+        self.fake.list_native = boom
+        self.assertEqual(await self.c.dispatcher._fail_vanished(), 0)
+        self.assertEqual(self.c.workflow.get_task(t.id).status, "dispatched")
+
+    async def test_a_terminal_task_is_never_failed_again(self):
+        _, t = await self._dispatched()
+        await self.c.workflow.on_task_finished(t.id, ok=True, result={"assistant_text": "done"})
+        self.fake.sessions.clear()
+        self.assertEqual(await self.c.dispatcher._fail_vanished(), 0)
+        self.assertEqual(self.c.workflow.get_task(t.id).status, "completed")

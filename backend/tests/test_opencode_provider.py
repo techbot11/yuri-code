@@ -29,7 +29,8 @@ from fake_opencode import FakeOpenCode  # noqa: E402
 from provider_contract import AgentProviderContract  # noqa: E402
 from yuri.providers.base import ProjectContext, SessionOptions  # noqa: E402
 from yuri.providers.opencode.client import OpenCodeError  # noqa: E402
-from yuri.providers.opencode.provider import OpenCodeProvider  # noqa: E402
+from yuri.providers.opencode.provider import (OpenCodeProvider,  # noqa: E402
+                                              _turn_error)
 from yuri.providers.opencode.server import OpenCodeServer  # noqa: E402
 
 UNREACHABLE = "http://127.0.0.1:1"      # nothing listens on port 1
@@ -643,3 +644,42 @@ class Transcript(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ATurnThatEndedBadlyTests(unittest.TestCase):
+    """A failed turn must not be reported as a successful one.
+
+    Found by the Phase 7 live acceptance run. `finish` is truthy whether a
+    turn ended well or badly — it is the string "error" on a failure — and
+    `advance()` only checked that it was present. So a flaky free model
+    returning `{"finish": "error", "error": {...}, "content": []}` came back
+    as `status: "completed"` with empty text.
+
+    Twice, live, that carried two workflow tasks to `completed` having changed
+    nothing at all: a task with no declared check has only the agent's word,
+    and the agent's word was a crash reported as success.
+    """
+
+    def test_an_error_object_is_reported_with_its_message(self):
+        out = _turn_error([{"type": "assistant", "finish": "error",
+                            "error": {"type": "unknown",
+                                      "message": "Invalid opencode/openai-compatible-chat "
+                                                 "stream event"}}])
+        self.assertIn("Invalid opencode", out)
+
+    def test_a_finish_of_error_with_no_detail_is_still_an_error(self):
+        # Silence is not success.
+        out = _turn_error([{"type": "assistant", "finish": "error"}])
+        self.assertIsNotNone(out)
+        self.assertIn("error", out)
+
+    def test_an_error_that_is_a_bare_string_is_read_too(self):
+        self.assertEqual(_turn_error([{"finish": "error", "error": "boom"}]), "boom")
+
+    def test_a_turn_that_ended_well_reports_no_error(self):
+        self.assertIsNone(_turn_error([{"type": "assistant", "finish": "stop",
+                                        "content": [{"type": "text", "text": "done"}]}]))
+
+    def test_an_error_type_with_no_message_still_names_something(self):
+        out = _turn_error([{"finish": "error", "error": {"type": "rate_limited"}}])
+        self.assertIn("rate_limited", out)

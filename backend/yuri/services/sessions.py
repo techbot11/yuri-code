@@ -863,6 +863,24 @@ class SessionService:
                                   {"assistant_text": (text or "")[:2000], "tools_used": list(tools_used or [])}))
         self.journal.append(f"turn completed in '{row.name or handle[:8]}': {' '.join((text or '').split())[:160]}")
 
+    def mark_lost(self, handle: str) -> bool:
+        """Record that an agent's process is gone, WITHOUT publishing.
+
+        Silent on purpose: the caller has detected this and is reporting the
+        failure itself, and publishing `session.lost` here would make the
+        workflow driver fail the same task a second time.
+
+        What this buys is the retry: `_reusable()` picks the specialist's
+        existing session, so without marking the row the next attempt is
+        dispatched straight back into the dead handle and fails identically.
+        """
+        row = self.store.sessions.get_by_native(handle)
+        if row is None or not row.is_live:
+            return False
+        row.status = "lost"
+        self.store.sessions.update(row)
+        return True
+
     def _mission_to(self, row: AgentSession, to: str, reason: str | None) -> None:
         """Move the row's mission in response to a SESSION-level event. Every
         transition made here restates something a session carrier already

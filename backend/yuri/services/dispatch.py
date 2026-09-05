@@ -65,6 +65,14 @@ HANDLED: frozenset[str] = frozenset({
 LOST_REASON = ("the agent process did not survive a backend restart, so this task's "
                "session is gone; retry it to start a fresh agent")
 
+# The same fact, noticed while the mission is RUNNING rather than at startup.
+# Observed live: a tmux session Yuri started died seconds later, and the task
+# sat at `dispatched` for ten minutes because a dead agent emits no events and
+# reconcile() only runs at startup. A task waiting on an agent that no longer
+# exists is waiting forever.
+VANISHED_REASON = ("the agent's session disappeared while this task was running — the "
+                   "process is gone; retry it to start a fresh agent")
+
 # How much of a turn's text a task keeps as its result. The publisher already
 # clips to 2000; this is the second, independent bound, because `result` is
 # stored as JSON on the row and read back into a handoff (spec §9).
@@ -466,6 +474,60 @@ class WorkflowDispatcher:
                 out.append(row.native_session_id)
         return out
 
+    def _in_flight_rows(self):
+        """(task, session row, provider) for every task waiting on an agent."""
+        out = []
+        for w in self.store.workflows.live():
+            for t in self.store.tasks.for_workflow(w.id):
+                if t.status not in IN_FLIGHT or not t.session_id:
+                    continue
+                row = self.store.sessions.get(t.session_id)
+                if row is None or not row.is_live:
+                    continue
+                try:
+                    provider = self.sessions.registry.get(row.agent_id or "")
+                except KeyError:
+                    continue
+                out.append((t, row, provider))
+        return out
+
+    async def _fail_vanished(self) -> int:
+        """Fail tasks whose agent no longer exists.
+
+        Polling covers an agent that cannot TELL us it finished. This covers
+        the other half: an agent that cannot tell us anything because it is
+        gone. Claude Code pushes events, so it is excluded from polling — but
+        a dead tmux session pushes nothing either, and reconcile() only looks
+        at startup. Observed live: a session died seconds after starting and
+        its task sat at `dispatched` for ten minutes.
+
+        Only when the provider ANSWERS. `list_native()` raising means we could
+        not enumerate, not that the session is gone, and failing a live task
+        on an unreachable provider would be worse than waiting.
+        """
+        failed = 0
+        known: dict[str, set[str] | None] = {}
+        for task, row, provider in self._in_flight_rows():
+            pid = provider.id
+            if pid not in known:
+                try:
+                    known[pid] = {str(s.get("handle") or s.get("id") or "")
+                                  for s in provider.list_native()}
+                except Exception:                          # noqa: BLE001
+                    known[pid] = None                      # could not enumerate
+            handles = known[pid]
+            if handles is None or row.native_session_id in handles:
+                continue
+            log.warning("workflow: %s's agent (%s) has vanished; failing the task",
+                        task.title, row.native_session_id)
+            # Mark the row BEFORE failing: on_task_finished applies the retry
+            # policy immediately, and `_reusable()` would otherwise hand the
+            # next attempt the same dead handle.
+            self.sessions.mark_lost(row.native_session_id)
+            await self.engine.on_task_finished(task.id, ok=False, error=VANISHED_REASON)
+            failed += 1
+        return failed
+
     async def _poll_once(self) -> int:
         """Poll each handle once. `poll()` publishes turn_completed/agent.error
         for a poll-only provider, and this driver's own subscriber then
@@ -493,6 +555,7 @@ class WorkflowDispatcher:
             try:
                 await asyncio.sleep(POLL_INTERVAL_S)
                 await self._poll_once()
+                await self._fail_vanished()
             except asyncio.CancelledError:
                 raise
             except Exception:                              # noqa: BLE001
