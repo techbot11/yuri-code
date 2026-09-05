@@ -240,7 +240,11 @@ agents, opencode. It becomes a UI surface rather than new logic.
 - A new backend endpoint exposes the doctor's findings as data (§6.5), so one implementation
   serves both the CLI and the app.
 - On first run, or whenever a **required** check fails, the app shows the doctor screen instead of
-  the main UI. Required means: `claude` present, and at least one voice key configured.
+  the main UI. Required means she cannot work at all without it: her home directory,
+  her database, `claude`, and at least one voice key. `tmux` is deliberately not
+  required — without it the `cli` backend loses its live terminal pane, but the `sdk`
+  backend still runs (§2.1) — and neither is `opencode`, which already only matters
+  when `YURI_AGENTS` asks for it.
 - Each failing check carries the action that fixes it. `claude` missing links to Claude Code's
   install page; `tmux` missing shows `brew install tmux` as copyable text and explains what is
   lost without it (the live terminal pane) rather than blocking.

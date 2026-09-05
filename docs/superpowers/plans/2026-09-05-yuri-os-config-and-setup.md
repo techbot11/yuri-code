@@ -482,7 +482,8 @@ class Registry(unittest.TestCase):
         names = [k.name for k in config.MANAGED_KEYS]
         for expected in ("GEMINI_API_KEY", "OPENAI_API_KEY", "AZURE_OPENAI_API_KEY",
                          "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
-                         "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"):
+                         "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+                         "ALLOWED_PROJECT_ROOTS"):
             self.assertIn(expected, names)
 
     def test_every_voice_key_var_is_managed(self):
@@ -586,6 +587,12 @@ MANAGED_KEYS: tuple[ManagedKey, ...] = (
     ManagedKey("ANTHROPIC_MODEL", "Default agent model", False, "next-session",
                "Which model an agent session uses when nothing asks for a "
                "specific one."),
+    # Read live by allowed_project_roots(), so a change applies at once. Also
+    # the setting that decides where Yuri may work at all, which is why the
+    # doctor's "allowed roots" message can point at this screen.
+    ManagedKey("ALLOWED_PROJECT_ROOTS", "Folders she may work in", False, "now",
+               "Comma-separated. A session outside these folders refuses to "
+               "start. Her own home is always allowed."),
 )
 
 
@@ -794,6 +801,26 @@ class ConfigWrite(_Harness):
         mode = os.stat(os.path.join(self.tmp.name, ".env")).st_mode & 0o777
         self.assertEqual(mode, 0o600, f"credentials file is mode {oct(mode)}")
 
+    def test_a_write_reaches_this_process_not_just_the_file(self):
+        # Voice keys and allowed roots are read live via os.getenv, so a file
+        # write alone leaves the running backend unchanged -- "takes effect
+        # straight away" would be a lie, and Setup's save-then-re-check could
+        # never see the key it just saved.
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GEMINI_API_KEY", None)
+            self.client.put("/yuri/config", json={"values": {"GEMINI_API_KEY": SECRET}})
+            self.assertEqual(os.environ.get("GEMINI_API_KEY"), SECRET)
+            # And the doctor must now agree that a voice key exists.
+            found = [v for v, _ in config.voice_keys_found()]
+            self.assertIn("GEMINI_API_KEY", found)
+
+    def test_clearing_a_key_removes_it_from_this_process_too(self):
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {"ANTHROPIC_MODEL": "old"}, clear=False):
+            self.client.put("/yuri/config", json={"values": {"ANTHROPIC_MODEL": ""}})
+            self.assertIsNone(os.environ.get("ANTHROPIC_MODEL"))
+
     def test_the_response_does_not_echo_what_was_written(self):
         with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name):
             r = self.client.put("/yuri/config", json={"values": {"GEMINI_API_KEY": SECRET}})
@@ -966,9 +993,11 @@ In `backend/yuri/api/routes.py`, alongside the other `@r.get` handlers. Add `fro
 
     @r.put("/config")
     async def write_config(body: ConfigUpdate):
-        """Write managed settings. Refuses any name not in MANAGED_KEYS: this
-        endpoint writes a file the backend reads at startup, so an arbitrary
-        name would let a caller set VC_AUTH_TOKEN or ALLOWED_PROJECT_ROOTS."""
+        """Write managed settings, to the file AND to this process.
+
+        Refuses any name not in MANAGED_KEYS: this endpoint writes a file the
+        backend reads at startup, so an arbitrary name would let a caller set
+        VC_AUTH_TOKEN or point ALLOWED_PROJECT_ROOTS anywhere."""
         known = {k.name: k for k in config.MANAGED_KEYS}
         unknown = sorted(set(body.values) - set(known))
         if unknown:
@@ -976,6 +1005,19 @@ In `backend/yuri/api/routes.py`, alongside the other `@r.get` handlers. Add `fro
                 status_code=400,
                 detail=f"not settings Yuri manages: {', '.join(unknown)}")
         path = await asyncio.to_thread(setup_store.write, dict(body.values))
+        # Also update THIS process's environment. Both voice_keys_found() and
+        # allowed_project_roots() read os.getenv live, so a file write alone
+        # changes nothing until a restart -- every "takes effect straight
+        # away" label would be false, and the Setup screen's save-then-
+        # re-check could never see the key it just saved. Only after the write
+        # succeeds, so the file and the environment cannot diverge on failure.
+        for name, raw in body.values.items():
+            clean = (raw or "").replace("\n", "").replace("\r", "").strip()
+            if clean:
+                os.environ[name] = clean
+            else:
+                os.environ.pop(name, None)
+            config.ENV_SOURCES[name] = "Setup"
         written = sorted(body.values)
         # De-duplicated, in the fixed order the UI explains them in.
         order = ("now", "next-session", "restart")
