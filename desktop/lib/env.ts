@@ -26,35 +26,50 @@ export const FALLBACK_PATH_DIRS: string[] = [
  *  into a garbage key. */
 export function parseEnvOutput(text: string): Env {
   const out: Env = {};
+  const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
   for (const entry of text.split("\0")) {
     if (!entry) continue;
-    // Strip shell noise BEFORE looking for '=', not after. A banner arrives
-    // glued to the first assignment (it has no NUL after it), and a banner
-    // containing an '=' -- a "====" divider, which real MOTDs are full of --
-    // would put that '=' before the true one if we searched the whole chunk,
-    // discarding the real assignment entirely.
+    // Find the first '=' that is actually an assignment's, by testing the
+    // name it would imply. Two things make the naive scans wrong:
     //
-    // Only take the after-last-newline slice when it actually looks like an
-    // assignment (`NAME=...`); otherwise fall back to the whole chunk. That
-    // fallback is what keeps a multi-line VALUE working -- env -0's whole
-    // reason for existing -- because then the last newline sits inside the
-    // value, the text after it doesn't look like an assignment, and we use
-    // the full chunk instead of truncating the value at that newline.
-    const nl = entry.lastIndexOf("\n");
-    let assignment = entry;
-    if (nl !== -1) {
-      const candidate = entry.slice(nl + 1);
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(candidate)) assignment = candidate;
+    //   - A shell banner arrives glued to the FIRST chunk (it has no NUL
+    //     after it), and a banner containing '=' -- a "====" divider, which
+    //     real MOTDs are full of -- makes indexOf("=") point into the noise.
+    //   - A VALUE may contain a newline (the reason the delimiter is NUL),
+    //     and its later lines may themselves look like "NAME=value". Anchoring
+    //     on the LAST newline therefore mistakes a continuation line for the
+    //     assignment and loses the real variable.
+    //
+    // Testing the candidate name settles both: the banner's '=' implies a
+    // name like "====" and is skipped, while a real "A=x\nB=y" is taken as A
+    // with the value "x\nB=y" -- which is what the format means, since NUL is
+    // the only record separator.
+    //
+    // One case is genuinely ambiguous and left as-is on purpose: a banner
+    // whose LAST line happens to look like an assignment (e.g. "Setting
+    // up\nDEBUG=true (banner text)") is indistinguishable from a real
+    // variable. Failing open -- a spurious key -- is the right way round,
+    // because failing closed would lose a real variable that has the same
+    // shape.
+    //
+    // The scan condition is `i !== -1`, not `i > 0`: a divider that starts
+    // AT index 0 (e.g. a "====" banner beginning the chunk) is a real '='
+    // position that must still be tested and rejected, not treated as "none
+    // found". Traced against the "====" divider test below: with `i > 0` the
+    // loop exits on the very first character instead of scanning past it,
+    // and the real PATH= further in the chunk is never reached.
+    let name = "";
+    let value = "";
+    for (let i = entry.indexOf("="); i !== -1; i = entry.indexOf("=", i + 1)) {
+      const before = entry.slice(0, i);
+      const candidate = before.slice(before.lastIndexOf("\n") + 1);
+      if (NAME.test(candidate)) {
+        name = candidate;
+        value = entry.slice(i + 1);
+        break;
+      }
     }
-    const eq = assignment.indexOf("=");
-    // A chunk with no '=' is not an assignment. Skipping it beats inventing
-    // a key with an empty name.
-    if (eq <= 0) continue;
-    const name = assignment.slice(0, eq);
-    // It must actually be a variable name, so genuine junk is still dropped
-    // rather than becoming a key with a plausible-looking value.
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
-    out[name] = assignment.slice(eq + 1);
+    if (name) out[name] = value;
   }
   return out;
 }

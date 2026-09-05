@@ -25,51 +25,45 @@ test("a failed probe changes nothing", () => {
   assert.deepEqual(mergeEnv(base, null), base);
 });
 
-test("env -0 output parses, including values containing '='", () => {
-  // A base URL with a query string, or a token with padding, both contain '='.
-  const text = "PATH=/usr/bin\0TOKEN=abc=def=\0EMPTY=\0";
-  const got = parseEnvOutput(text);
+test("a plain assignment parses", () => {
+  const got = parseEnvOutput("PATH=/usr/bin\0TOKEN=abc=def=\0EMPTY=\0");
   assert.equal(got.PATH, "/usr/bin");
-  assert.equal(got.TOKEN, "abc=def=", "only the FIRST '=' separates name from value");
+  assert.equal(got.TOKEN, "abc=def=", "only the assignment's own '=' separates");
   assert.equal(got.EMPTY, "");
 });
 
-test("a line without '=' is skipped rather than becoming a blank key", () => {
-  const got = parseEnvOutput("PATH=/usr/bin\0garbage\0HOME=/Users/x\0");
-  assert.deepEqual(Object.keys(got).sort(), ["HOME", "PATH"]);
+test("a banner is skipped, with or without an '=' in it", () => {
+  // A "====" divider is the common MOTD shape and puts an '=' before the
+  // real one; the banner's '=' implies the name "====", which is not a name.
+  for (const banner of ["Welcome!\nLast login: whenever\n", "====================\nWelcome\n"]) {
+    const got = parseEnvOutput(`${banner}PATH=/opt/homebrew/bin\0ANTHROPIC_MODEL=m\0`);
+    assert.equal(got.PATH, "/opt/homebrew/bin", banner);
+    assert.equal(got.ANTHROPIC_MODEL, "m", banner);
+    assert.equal(Object.keys(got).length, 2, `${banner}: the banner must not become a key`);
+  }
 });
 
-test("a shell banner does not swallow the first variable", () => {
-  // Measured against a fake shell: without this, PATH was lost under a key
-  // made of the banner while every later variable survived.
-  const text = "Welcome!\nLast login: whenever\nPATH=/opt/homebrew/bin\0ANTHROPIC_MODEL=m\0";
-  const got = parseEnvOutput(text);
-  assert.equal(got.PATH, "/opt/homebrew/bin");
-  assert.equal(got.ANTHROPIC_MODEL, "m");
-  assert.equal(Object.keys(got).length, 2, "the banner must not become a key");
+test("a value containing a newline round-trips, banner or not", () => {
+  // This is why the delimiter is NUL and not newline.
+  assert.equal(parseEnvOutput("MULTI=first\nsecond\0").MULTI, "first\nsecond");
+  assert.equal(parseEnvOutput("Welcome\nMULTI=first\nsecond\0").MULTI, "first\nsecond");
 });
 
-test("a name that is not a variable name is dropped", () => {
-  // Junk with an '=' in it must not become a key just because it parses.
+test("a continuation line that looks like an assignment stays in the value", () => {
+  // NUL is the only record separator, so this is ONE record: A, whose value
+  // happens to contain a newline and then something assignment-shaped.
+  const got = parseEnvOutput("A=x\nB=y\0");
+  assert.deepEqual(got, { A: "x\nB=y" });
+});
+
+test("junk with an '=' does not become a variable", () => {
   const got = parseEnvOutput("not a name=value\0GOOD=1\0also-bad=2\0");
   assert.deepEqual(Object.keys(got), ["GOOD"]);
 });
 
-test("a value containing a newline still round-trips", () => {
-  // The reason the delimiter is NUL and not newline in the first place. Only
-  // the KEY is newline-trimmed; the value is untouched.
-  const got = parseEnvOutput("MULTI=first\nsecond\0");
-  assert.equal(got.MULTI, "first\nsecond");
-});
-
-test("a banner containing '=' still does not swallow the first variable", () => {
-  // A "====" divider is the common MOTD shape, and it puts an '=' before the
-  // real assignment's.
-  const got = parseEnvOutput(
-    "========================\nWelcome\nPATH=/opt/homebrew/bin\0ANTHROPIC_MODEL=m\0");
-  assert.equal(got.PATH, "/opt/homebrew/bin");
-  assert.equal(got.ANTHROPIC_MODEL, "m");
-  assert.equal(Object.keys(got).length, 2);
+test("a chunk with no assignment at all is dropped", () => {
+  assert.deepEqual(parseEnvOutput("Welcome to zsh\nType help\0"), {});
+  assert.deepEqual(parseEnvOutput("=novalue\0"), {}, "an empty name is not a name");
 });
 
 test("the fallback PATH covers where the tools actually live", () => {
