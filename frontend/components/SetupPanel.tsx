@@ -25,18 +25,21 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
   const [saved, setSaved] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<DoctorCheck[] | null> => {
     try {
       const [d, c] = await Promise.all([
         yget<{ checks: DoctorCheck[]; ok: boolean }>("doctor"),
         yget<{ keys: ManagedKey[]; path: string }>("config"),
       ]);
-      setChecks(d.checks || []);
+      const fresh = d.checks || [];
+      setChecks(fresh);
       setKeys(c.keys || []);
       setWhere(c.path || "");
       setLoadError(null);
+      return fresh;
     } catch (e) {
       setLoadError(e);
+      return null;
     }
   }, []);
 
@@ -55,13 +58,18 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
       for (const n of names) values[n] = draft[n] ?? "";
       const res = await yput<{ effects: Effect[] }>("config", { values });
       setSaved(effectsSentence(res.effects || []));
-      setDraft({});
-      await load();
+      // Clear only the keys that were saved. Clearing the whole draft would
+      // discard anything typed while the request was in flight -- the inputs
+      // stay editable on purpose, so that window is real.
+      setDraft((d) => {
+        const rest = { ...d };
+        for (const n of names) delete rest[n];
+        return rest;
+      });
       // Re-read rather than trusting the save: a key can be written and still
-      // leave something else blocking.
-      const fresh = await yget<{ checks: DoctorCheck[] }>("doctor");
-      setChecks(fresh.checks || []);
-      if (blocking(fresh.checks || []).length === 0) onPass?.();
+      // leave something else blocking. load() IS that re-read.
+      const fresh = await load();
+      if (fresh && blocking(fresh).length === 0) onPass?.();
     } catch (e) {
       setSaveError(e instanceof ApiError ? e.message : String(e));
     } finally {
