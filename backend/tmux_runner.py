@@ -203,7 +203,11 @@ class _TmuxSession:
 
 class TmuxClaudeRunner(ClaudeRunner):
     def __init__(self, default_model: str | None = None):
-        self._default_model = default_model or os.getenv("CLAUDE_MODEL", "opus")
+        # "" means DEFER: pass no --model and let the CLI use the user's own
+        # config (ANTHROPIC_MODEL, settings.json, /model). Pinning "opus" here
+        # silently overrode a custom model on every session, because a --model
+        # flag beats every one of those.
+        self._default_model = default_model or os.getenv("CLAUDE_MODEL", "")
         self._sessions: dict[str, _TmuxSession] = {}
         self._bg: dict[str, asyncio.Task[AdvanceResult]] = {}
 
@@ -260,6 +264,9 @@ class TmuxClaudeRunner(ClaudeRunner):
         self._write_mode(s)
 
         chrome = "--chrome " if ENABLE_CHROME else ""
+        # Omitted when no model was asked for, so the CLI falls back to the
+        # user's own configuration rather than one this process chose.
+        model_flag = f"--model {shlex.quote(s.model)} " if s.model else ""
         # `--agents <json>` carries a whole persona (description/prompt/tools/
         # model) as ONE shell word. shlex.quote is not optional here: this repo
         # has already shipped a shell-escaping bug from interpolating untrusted
@@ -270,7 +277,7 @@ class TmuxClaudeRunner(ClaudeRunner):
         agent_flag = f"--agent {shlex.quote(s.agent_slug)} " if s.agent_slug else ""
         inner = (
             f"VC_CTRL={shlex.quote(s.ctrl)} "
-            f"claude {claude_id_arg} --model {shlex.quote(s.model)} "
+            f"claude {claude_id_arg} {model_flag}"
             f"--permission-mode {shlex.quote(s.mode)} "
             f"{agents_flag}{agent_flag}"
             f"{chrome}--settings {shlex.quote(os.path.join(s.ctrl, 'settings.json'))}"

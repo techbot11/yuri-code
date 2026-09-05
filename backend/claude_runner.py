@@ -217,7 +217,9 @@ def _agents_for_sdk(agents_json: str) -> dict[str, Any] | None:
 
 class SDKClaudeRunner(ClaudeRunner):
     def __init__(self, default_model: str | None = None):
-        self._default_model = default_model or os.getenv("CLAUDE_MODEL", "opus")
+        # "" defers to the SDK's own resolution (ANTHROPIC_MODEL, settings)
+        # rather than pinning a model here. See tmux_runner for why.
+        self._default_model = default_model or os.getenv("CLAUDE_MODEL", "")
         self._sessions: dict[str, _Session] = {}
         # In-flight background advance/answer tasks, keyed by session handle.
         self._bg: dict[str, asyncio.Task[AdvanceResult]] = {}
@@ -244,7 +246,9 @@ class SDKClaudeRunner(ClaudeRunner):
         # list_native() still reported the persona as applied.
         agents = _agents_for_sdk(agents_json) if agents_json else None
         opts = sdk.ClaudeAgentOptions(
-            model=s.model,
+            # Passing model="" would ask for a model literally named "", so an
+            # unset model omits the option and lets the SDK resolve it.
+            **({"model": s.model} if s.model else {}),
             cwd=cwd,
             permission_mode=s.mode,      # risky tools route to can_use_tool in default/plan
             can_use_tool=_cb,

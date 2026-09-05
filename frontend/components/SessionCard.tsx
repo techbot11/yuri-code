@@ -185,7 +185,10 @@ export function SessionCard({
       )}
 
       <div className="path">
-        {s.backend?.toUpperCase()} · {s.model}
+        {/* An unset model means the engine chose it from the user's own
+            config, so there is nothing true to print -- and " . " with a gap
+            after it reads as a value that failed to load. */}
+        {s.backend?.toUpperCase()}{s.model ? ` · ${s.model}` : ""}
         {s.cost_usd && s.cost_usd > 0 ? ` · $${s.cost_usd.toFixed(4)}` : ""} · {abbrevHome(s.cwd)}
       </div>
 

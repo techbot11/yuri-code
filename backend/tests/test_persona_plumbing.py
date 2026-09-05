@@ -71,7 +71,10 @@ class _FakeTmux:
         return 0, ""
 
 
-class TmuxAgentsShellEscapingTests(unittest.IsolatedAsyncioTestCase):
+class _TmuxHarness(unittest.IsolatedAsyncioTestCase):
+    """Setup only, NO tests. Subclassing a class that carries its own tests
+    makes unittest re-run every one of them under the subclass's name."""
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.patches = [
@@ -88,6 +91,8 @@ class TmuxAgentsShellEscapingTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(lambda: [p.stop() for p in self.patches])
         self.addCleanup(self.tmp.cleanup)
 
+
+class TmuxAgentsShellEscapingTests(_TmuxHarness):
     async def _spawn_and_capture(self, agents_json, agent_slug):
         runner = tmux_runner.TmuxClaudeRunner()
         fake = _FakeTmux()
@@ -440,3 +445,44 @@ class ARequestedPersonaIsNeverSilentlyDroppedTests(unittest.IsolatedAsyncioTestC
         for row in p.list_native():
             self.assertIsNone(row.get("agent"),
                               "reported a persona that was never applied")
+
+
+# ---------------------------------------------------------------------------
+# The --model flag is OPTIONAL. Pinning a model here overrode whatever the
+# user had configured (ANTHROPIC_MODEL, settings.json, /model), because a
+# CLI flag beats all of them -- so a custom model never applied to a session
+# Yuri started. Unset now means "say nothing and let the CLI decide".
+# ---------------------------------------------------------------------------
+class TmuxModelFlagTests(_TmuxHarness):
+
+    async def _inner(self, *, default_model, model):
+        runner = tmux_runner.TmuxClaudeRunner(default_model=default_model)
+        fake = _FakeTmux()
+        runner._tmux = fake
+        await runner.start("/tmp", model=model, mode="default")
+        (call,) = [c for c in fake.calls if c[0] == "new-session"]
+        return call[-1]
+
+    async def test_no_model_anywhere_means_no_model_flag(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLAUDE_MODEL", None)
+            inner = await self._inner(default_model=None, model=None)
+        self.assertNotIn("--model", inner,
+                         "an unset model must let the CLI resolve its own")
+        # The rest of the command is still well-formed -- no doubled or
+        # swallowed flags where --model used to sit.
+        tokens = shlex.split(inner)
+        self.assertIn("--permission-mode", tokens)
+        self.assertEqual(tokens[tokens.index("--permission-mode") + 1], "default")
+
+    async def test_an_explicit_model_is_still_passed(self):
+        inner = await self._inner(default_model=None, model="sonnet")
+        tokens = shlex.split(inner)
+        self.assertEqual(tokens[tokens.index("--model") + 1], "sonnet")
+
+    async def test_the_env_default_still_applies_when_set(self):
+        # Someone who wants every Yuri session pinned can still say so.
+        with mock.patch.dict(os.environ, {"CLAUDE_MODEL": "haiku"}):
+            inner = await self._inner(default_model=None, model=None)
+        tokens = shlex.split(inner)
+        self.assertEqual(tokens[tokens.index("--model") + 1], "haiku")
