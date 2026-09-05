@@ -51,3 +51,13 @@ test("applying an event does not mutate the state it was given", () => {
   assert.equal(before.backend, "starting");
   assert.notEqual(before, after);
 });
+
+test("a child that failed never becomes ready afterwards", () => {
+  // The false-ready bug: a stranger answering on the port reported ready
+  // while the real child was still dying. Whatever order the events arrive
+  // in, a failure must stick.
+  let s = applyBootEvent(initialBoot(), { type: "failed", child: "backend", detail: "port busy" });
+  s = applyBootEvent(s, { type: "ready", child: "backend" });
+  assert.equal(s.backend, "failed");
+  assert.equal(bootPhase(s), "failed");
+});

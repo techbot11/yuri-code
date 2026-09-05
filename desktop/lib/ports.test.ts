@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_BACKEND_PORT, DEFAULT_FRONTEND_PORT, defaultPorts, portsFromEnv } from "./ports.ts";
+import { DEFAULT_BACKEND_PORT, DEFAULT_FRONTEND_PORT, defaultPorts, portBusyDetail, portsFromEnv } from "./ports.ts";
 
 test("the shipping defaults are the ports the app is configured around", () => {
   // Fixed on purpose: VC_ALLOWED_ORIGINS and the LAN-access feature both
@@ -52,4 +52,11 @@ test("the two env vars are independent", () => {
   const p = portsFromEnv({ YURI_DESKTOP_FRONTEND_PORT: "3177" });
   assert.equal(p.backend, 8000);
   assert.equal(p.frontend, 3177);
+});
+
+test("the busy-port message names the port and what to do", () => {
+  const msg = portBusyDetail(8000, "backend");
+  assert.match(msg, /8000/);
+  assert.match(msg, /backend/);
+  assert.match(msg, /bin\/yuri up/, "the likely cause is the developer's own server");
 });

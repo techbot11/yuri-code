@@ -36,3 +36,10 @@ export function portsFromEnv(env: Record<string, string | undefined>): Ports {
     frontend: parsePort(env.YURI_DESKTOP_FRONTEND_PORT, DEFAULT_FRONTEND_PORT),
   };
 }
+
+/** The message for an occupied port. Names the port and what to do, because
+ *  the overwhelmingly likely cause is the developer's own `bin/yuri up`. */
+export function portBusyDetail(port: number, which: "backend" | "frontend"): string {
+  return `port ${port} is already in use, so the ${which} cannot start — ` +
+         `stop whatever is listening on it (\`bin/yuri up\` uses this port) and try again`;
+}
