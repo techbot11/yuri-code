@@ -6,9 +6,18 @@
 // pure function with tests, because there is no Electron test environment.
 import { app, BrowserWindow, shell } from "electron";
 import * as path from "node:path";
+import { applyBootEvent, bootPhase, initialBoot } from "../lib/boot";
+import { mergeEnv, withFallbackPath, type Env } from "../lib/env";
 import { isAppUrl } from "../lib/urls";
+import { portsFromEnv } from "../lib/ports";
+import { startServers, stopServers } from "./servers";
+import { homeDir, probeLoginEnv } from "./shellEnv";
 
-const FRONTEND_URL = "http://localhost:3000";
+// Overridable so a verification run can point the shell at other ports
+// without fighting a `bin/yuri up` the developer already has running; absent,
+// the shipping defaults (8000/3000) apply. See lib/ports.ts.
+const ports = portsFromEnv(process.env);
+const FRONTEND_URL = `http://localhost:${ports.frontend}`;
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -47,12 +56,31 @@ function createWindow(): BrowserWindow {
 }
 
 app.whenReady().then(async () => {
+  // The probe is bounded and best-effort; the fallback PATH covers a failure.
+  const probed = await probeLoginEnv();
+  const env = withFallbackPath(mergeEnv(process.env as Env, probed), homeDir());
+
+  let boot = initialBoot();
   mainWindow = createWindow();
+
+  await startServers(env, (ev) => {
+    boot = applyBootEvent(boot, ev);
+  }, ports);
+
+  if (bootPhase(boot) !== "ready") {
+    // Task 4 replaces this with the boot window's failure state. Until then,
+    // failing loudly beats a blank window. Never log `env`: it carries
+    // ANTHROPIC_AUTH_TOKEN and friends.
+    console.error("[yuri] boot failed:", boot.error);
+    app.quit();
+    return;
+  }
   await mainWindow.loadURL(FRONTEND_URL);
   mainWindow.show();
 });
 
-// Placeholder for Task 4, which replaces this with hide-on-close. Quitting
-// here is wrong on purpose-free grounds: it is simply what Electron does
-// until the lifecycle task lands.
-app.on("window-all-closed", () => app.quit());
+app.on("before-quit", async (event) => {
+  event.preventDefault();
+  await stopServers();
+  app.exit(0);
+});
