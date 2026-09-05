@@ -368,26 +368,43 @@ needs only a per-platform build.
 
 ## 9. Risks, each with the check that settles it
 
-**R1 — Microphone permission on an unsigned app. — LARGELY RESOLVED; one human check left.**
+**R1 — Microphone permission on an unsigned app. — RESOLVED, and it is the bad answer.**
 *Measured 2026-09-05* with a packaged probe (`electron-builder --dir`, `identity: null`,
-`hardenedRuntime: false`, `appId: com.yuri.r1probe`, Electron 35.7.5):
+`hardenedRuntime: false`, `appId: com.yuri.r1probe`, Electron 35.7.5).
 
-- `NSMicrophoneUsageDescription` reaches `Info.plist` via `mac.extendInfo`, and the packaged app
-  reports `getMediaAccessStatus("microphone") == "not-determined"` — so it is correctly identified
-  to TCC rather than broken.
-- **The code signature is stable across rebuilds.** `CDHash` was byte-identical before and after a
-  source change plus a full repackage. The reason: `identity: null` means electron-builder does not
-  sign at all, so the executable keeps stock Electron's own `adhoc,linker-signed` signature, and
-  application code lives in `Resources/app.asar`, which that signature does not cover. TCC keys on
-  what does not change, so **a grant should survive ordinary rebuilds**.
-- **But the signing identity is `Identifier=Electron`, not the app's bundle id**, and the hash is
-  stock Electron's. Two consequences the plan must account for: upgrading Electron changes the
-  hash and therefore **resets the microphone grant**, and the signature provides no identity of its
-  own — any unsigned Electron app built this way presents the same code identity. Neither blocks
-  the project; both are reasons real signing is the eventual answer rather than an optional extra.
+What works:
 
-*Remaining, and it needs a human click by design:* grant the prompt once, rebuild, and confirm the
-grant persists. The probe is retained for this.
+- `NSMicrophoneUsageDescription` reaches `Info.plist` via `mac.extendInfo`, the TCC prompt appears,
+  and after granting it **`getUserMedia` in the renderer succeeds with a real device** — so voice,
+  including the WebRTC transport, works in a packaged unsigned Electron app. That was the primary
+  question and the answer is yes.
+- A grant persists across repeated launches of the *same* build.
+
+What does not:
+
+- **A grant does not survive a rebuild.** Status went `not-determined` → granted (after the
+  prompt) → still granted on a second launch → **`not-determined` again after repackaging**.
+- This happened even though the `CDHash` was byte-identical before and after (`5c06d5ad…`, stable
+  across four rebuilds, because `identity: null` means electron-builder never signs and the
+  executable keeps stock Electron's `adhoc,linker-signed` signature while application code sits in
+  `Resources/app.asar`). An earlier draft of this spec inferred from that stability that grants
+  would survive; **that inference was wrong.** TCC is keying on something the identical cdhash does
+  not capture — plausibly the bundle's on-disk identity, destroyed when the build directory is
+  replaced. The mechanism is unconfirmed; the behaviour is measured.
+
+Consequences for the plan, which are real:
+
+1. **Every packaged rebuild re-prompts for the microphone during development.** Tolerable, but it
+   must be expected rather than diagnosed repeatedly, and it makes "voice broke after a rebuild" a
+   known cause rather than a mystery.
+2. **Real code signing moves from optional to strongly indicated.** A stable Developer ID
+   signature gives TCC a durable identity. This spec still ships unsigned first — the app works —
+   but §11's "out of scope" for signing should be read as *deferred*, not *unnecessary*, and it is
+   the fix for this if development friction becomes annoying.
+3. The boot/doctor screen must **detect `denied` microphone status and say so plainly**, with the
+   path to System Settings. A silently-denied mic is otherwise indistinguishable from voice being
+   broken — the failure the design guide's "empty, loading and failed never look the same" rule
+   exists to prevent.
 
 **R2 — Bundled Python and native wheels. — RESOLVED, with a caveat.**
 *Measured 2026-09-05:* `cpython-3.14.7+20260901-aarch64-apple-darwin-install_only_stripped`
@@ -435,8 +452,9 @@ functionality changes. New coverage:
 
 ## 11. Out of scope
 
-- Signing and notarization for public distribution. Unsigned, matching the reference, unless R1
-  forces otherwise.
+- Signing and notarization for public distribution. Unsigned first, matching the reference.
+  **Deferred rather than unnecessary:** R1 measured that an unsigned app loses its microphone
+  grant on every rebuild, and a Developer ID signature is the fix. Revisit if that friction bites.
 - Auto-update, crash reporting, telemetry.
 - The mini window. The user declined it; `⌘⇧Y` replaces the affordance it provided.
 - Moving voice into the main process. There is one renderer, so there is no conflict to solve.
