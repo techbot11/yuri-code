@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
+from dataclasses import dataclass
 
 # backend/.env lives next to this file — resolved explicitly (not by CWD) so
 # `uvicorn main:app` from any directory behaves the same.
@@ -100,7 +101,7 @@ def missing_key_detail(var: str) -> str:
     """Actionable error body for a missing provider key/setting — says where we
     looked and how to fix it, instead of a bare 'not set'."""
     return (f"{var} is not set on the server. Looked in {env_files_checked()}. "
-            f"Add it with `yapcode config`, or re-run the setup wizard (`yapcode up`).")
+            f"Add it in Yuri OS under Setup.")
 
 
 def summary() -> str:
@@ -112,6 +113,89 @@ def summary() -> str:
              "including localhost)" if AUTH_TOKEN else "not set (loopback-only access)")
     roots = (os.getenv("ALLOWED_PROJECT_ROOTS") or "").strip() or "(not set)"
     return f"voice keys: {voice} · auth token: {token} · allowed roots: {roots}"
+
+
+# --- managed configuration, for the Setup UI ------------------------------
+# The settings a user can change from inside the app. Everything here is
+# rendered by GET /yuri/config and written by PUT /yuri/config.
+#
+# `effect` says what a change takes effect on, because it is NOT uniform and
+# a UI that implied otherwise would be lying:
+#   "now"          read live via os.getenv at use time
+#   "next-session" passed to a child process when it is spawned
+#   "restart"      frozen into a module constant at import (see YURI_HOME etc.)
+
+
+@dataclass(frozen=True)
+class ManagedKey:
+    name: str
+    label: str
+    secret: bool
+    effect: str
+    blurb: str
+
+
+MANAGED_KEYS: tuple[ManagedKey, ...] = (
+    ManagedKey("GEMINI_API_KEY", "Gemini API key", True, "now",
+               "Lets her talk over Gemini Live. One voice key is required."),
+    ManagedKey("OPENAI_API_KEY", "OpenAI API key", True, "now",
+               "Lets her talk over OpenAI Realtime instead."),
+    ManagedKey("AZURE_OPENAI_API_KEY", "Azure OpenAI key", True, "now",
+               "For OpenAI Realtime through Azure."),
+    ManagedKey("ANTHROPIC_API_KEY", "Anthropic API key", True, "next-session",
+               "Used by the coding agents when they are not signed in to "
+               "Claude Code."),
+    ManagedKey("ANTHROPIC_AUTH_TOKEN", "Anthropic auth token", True, "next-session",
+               "For a gateway that authenticates with a token rather than an "
+               "API key."),
+    ManagedKey("ANTHROPIC_BASE_URL", "Anthropic base URL", False, "next-session",
+               "Point the agents at a gateway or proxy instead of the default "
+               "endpoint."),
+    ManagedKey("ANTHROPIC_MODEL", "Default agent model", False, "next-session",
+               "Which model an agent session uses when nothing asks for a "
+               "specific one."),
+    # Read live by allowed_project_roots(), so a change applies at once. Also
+    # the setting that decides where Yuri may work at all, which is why the
+    # doctor's "allowed roots" message can point at this screen.
+    ManagedKey("ALLOWED_PROJECT_ROOTS", "Folders she may work in", False, "now",
+               "Comma-separated. A session outside these folders refuses to "
+               "start. Her own home is always allowed."),
+)
+
+
+def masked_hint(value: str, *, secret: bool = True) -> str:
+    """A hint that identifies a value without revealing it.
+
+    Only the last four characters, and only when there is enough left over to
+    keep hidden -- "…abcd" of a six-character secret reveals most of it. Short
+    secrets get no hint at all. Non-secrets (a URL, a model name) are
+    configuration rather than credentials, so masking them would make the UI
+    useless."""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if not secret:
+        return value
+    return f"…{value[-4:]}" if len(value) > 8 else "set"
+
+
+def managed_status() -> list[dict]:
+    """Every managed key: whether it is set, a hint, where it came from, and
+    what changing it takes effect on.
+
+    NEVER returns a value. This function is the boundary the Setup UI reads
+    through, so a leak here is a leak everywhere."""
+    out = []
+    for k in MANAGED_KEYS:
+        raw = (os.getenv(k.name) or "").strip()
+        out.append({
+            "name": k.name, "label": k.label, "secret": k.secret,
+            "effect": k.effect, "blurb": k.blurb,
+            "set": bool(raw),
+            "hint": masked_hint(raw, secret=k.secret) if raw else "",
+            "source": _source_of(k.name),
+        })
+    return out
 
 
 def _env_bool(name: str, default: bool) -> bool:
