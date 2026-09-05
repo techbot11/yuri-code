@@ -201,6 +201,49 @@ class _TmuxSession:
         self._extra_tasks: list[asyncio.Task] = []
 
 
+# --- pane scrolling --------------------------------------------------------
+# The live-terminal WebSocket bridges a PTY running `tmux attach-session`, so
+# the browser IS a tmux client. Scrolling used to be done by writing PgUp/PgDn
+# into that PTY, which hands them to the application inside the pane -- and
+# Claude Code reads them as prompt-history navigation, so "scroll up" walked
+# the user's previous prompts instead of the output. Reported symptom: "i am
+# not able to scroll into tmux UI, instead it changes history message".
+#
+# tmux's own copy-mode is the mechanism that actually scrolls a pane, and
+# driving it as a COMMAND rather than a keystroke avoids depending on the
+# user's prefix key, which they may have rebound.
+SCROLL_DIRECTIONS: tuple[str, ...] = ("up", "down", "bottom")
+
+
+async def scroll_pane(pane: str, direction: str) -> tuple[int, str]:
+    """Scroll a pane's own scrollback. Returns (rc, output) of the last command.
+
+    `bottom` cancels copy-mode, which is what returns the pane to following
+    live output -- without it a user who scrolled up would see a frozen view
+    and conclude the session had hung.
+    """
+    if direction not in SCROLL_DIRECTIONS:
+        raise ValueError(f"unknown scroll direction: {direction!r}")
+
+    async def tmux(*args: str) -> tuple[int, str]:
+        proc = await asyncio.create_subprocess_exec(
+            "tmux", *args,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await proc.communicate()
+        return proc.returncode or 0, out.decode(errors="replace")
+
+    if direction == "bottom":
+        # Errors when the pane is not in copy-mode, which is the common case
+        # and means it is already at the bottom -- nothing to report.
+        return await tmux("send-keys", "-t", pane, "-X", "cancel")
+
+    # `copy-mode` on a pane already in copy-mode is a no-op, so entering
+    # unconditionally is simpler than asking first and racing the answer.
+    await tmux("copy-mode", "-t", pane)
+    return await tmux("send-keys", "-t", pane, "-X",
+                      "halfpage-up" if direction == "up" else "halfpage-down")
+
+
 class TmuxClaudeRunner(ClaudeRunner):
     def __init__(self, default_model: str | None = None):
         # "" means DEFER: pass no --model and let the CLI use the user's own

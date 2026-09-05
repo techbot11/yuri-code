@@ -34,7 +34,7 @@ from pydantic import BaseModel, Field
 import config
 import event_log
 from cost_log import COST_LOG_PATH, append_cost_event
-from tmux_runner import validate_session_id
+from tmux_runner import scroll_pane, validate_session_id
 from tools import all_tools, dispatch_tool, tools_for_model
 from yuri import app as yuri_app
 from yuri import setup_store
@@ -605,6 +605,17 @@ async def session_terminal(ws: WebSocket, handle: str) -> None:
                     try:
                         r = json.loads(text)["__resize"]
                         _set_winsize(fd, int(r["rows"]), int(r["cols"]))
+                    except Exception:
+                        pass
+                elif text.startswith('{"__scroll"'):
+                    # Scrolling must NOT be keystrokes. PgUp/PgDn written to
+                    # this PTY reach the application inside the pane, and
+                    # Claude Code reads them as prompt-history navigation --
+                    # so "scroll up" walked the user's previous prompts
+                    # instead of the output. tmux copy-mode is what actually
+                    # scrolls a pane.
+                    try:
+                        await scroll_pane(pane, json.loads(text)["__scroll"])
                     except Exception:
                         pass
                 else:

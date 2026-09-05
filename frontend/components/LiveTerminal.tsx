@@ -14,12 +14,22 @@ export default function LiveTerminal({ handle }: { handle: string }) {
   const ref = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-  // Scroll the Claude TUI by sending it the keys it documents under tmux
-  // (PgUp/PgDn, Ctrl+End to jump to bottom). This is the only way to scroll on
-  // mobile, where there's no wheel and touch can't reach the full-screen TUI.
+  // Raw keystrokes into the PTY. Scrolling does NOT use this -- see scroll().
   const send = (seq: string) => {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(seq);
+  };
+
+  // Scrolling goes through tmux's copy-mode, NOT through keystrokes. PgUp and
+  // PgDn written into the PTY reach the application inside the pane, and
+  // Claude Code reads them as prompt-history navigation -- so "scroll up"
+  // walked the user's previous prompts instead of the output. "bottom" leaves
+  // copy-mode, which is what makes the pane follow live output again.
+  const scroll = (direction: "up" | "down" | "bottom") => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ __scroll: direction }));
+    }
   };
 
   useEffect(() => {
@@ -87,16 +97,17 @@ export default function LiveTerminal({ handle }: { handle: string }) {
     ro.observe(el);
 
     // Touch-gesture scrolling: the TUI's alternate screen has no local
-    // scrollback for xterm to pan, so we translate vertical swipes into wheel
-    // events sent to the app (the same way a desktop wheel scrolls it).
+    // scrollback for xterm to pan, so a vertical swipe becomes a tmux
+    // copy-mode scroll -- the same path the buttons and the wheel take.
     let lastY = 0;
     let accum = 0;
     const STEP = 20; // px of swipe per wheel notch
+    // Same reasoning as the buttons: an SGR wheel event is delivered to the
+    // application in the pane, which is free to treat it as anything. Ask
+    // tmux to scroll its own scrollback instead.
     const wheel = (up: boolean) => {
       if (ws.readyState !== WebSocket.OPEN) return;
-      const col = Math.max(1, Math.floor(term.cols / 2));
-      const row = Math.max(1, Math.floor(term.rows / 2));
-      ws.send(`\x1b[<${up ? 64 : 65};${col};${row}M`);
+      ws.send(JSON.stringify({ __scroll: up ? "up" : "down" }));
     };
     const onTouchStart = (e: TouchEvent) => {
       lastY = e.touches[0].clientY;
@@ -131,9 +142,9 @@ export default function LiveTerminal({ handle }: { handle: string }) {
     <div className="liveterm-wrap">
       <div className="liveterm" ref={ref} />
       <div className="term-scrollbtns">
-        <button onClick={() => send("\x1b[5~")} title="Scroll up" aria-label="Scroll up"><Icon name="scroll-up" size={15} /></button>
-        <button onClick={() => send("\x1b[6~")} title="Scroll down" aria-label="Scroll down"><Icon name="scroll-down" size={15} /></button>
-        <button onClick={() => send("\x1b[1;5F")} title="Jump to bottom" aria-label="Jump to bottom"><Icon name="scroll-bottom" size={15} /></button>
+        <button onClick={() => scroll("up")} title="Scroll up" aria-label="Scroll up"><Icon name="scroll-up" size={15} /></button>
+        <button onClick={() => scroll("down")} title="Scroll down" aria-label="Scroll down"><Icon name="scroll-down" size={15} /></button>
+        <button onClick={() => scroll("bottom")} title="Back to live" aria-label="Back to live"><Icon name="scroll-bottom" size={15} /></button>
       </div>
     </div>
   );

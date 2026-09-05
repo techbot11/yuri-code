@@ -562,3 +562,57 @@ class TmuxAgentEnvTests(_TmuxHarness):
             got = config.agent_child_env()
         self.assertNotIn("ANTHROPIC_MODEL", got)
         self.assertEqual(got["ANTHROPIC_BASE_URL"], "https://gw/v1")
+
+
+# ---------------------------------------------------------------------------
+# Pane scrolling. This was done by writing PgUp/PgDn into the PTY, which
+# hands them to the application inside the pane -- and Claude Code reads them
+# as prompt-history navigation, so "scroll up" walked the user's previous
+# prompts instead of the output. tmux copy-mode is what actually scrolls.
+# ---------------------------------------------------------------------------
+class ScrollPaneTests(unittest.IsolatedAsyncioTestCase):
+    """Plain TestCase: no tmux session, no runner, no container."""
+
+    async def test_an_unknown_direction_is_refused(self):
+        # Not silently ignored: the direction comes off a WebSocket message,
+        # and a typo that scrolls nothing is worse than one that says so.
+        with self.assertRaises(ValueError) as ctx:
+            await tmux_runner.scroll_pane("some-pane", "sideways")
+        self.assertIn("sideways", str(ctx.exception))
+
+    async def test_the_three_directions_are_the_documented_ones(self):
+        self.assertEqual(tmux_runner.SCROLL_DIRECTIONS, ("up", "down", "bottom"))
+
+    async def test_up_enters_copy_mode_then_scrolls(self):
+        calls: list[tuple[str, ...]] = []
+
+        async def fake_exec(*args, **kw):
+            calls.append(args)
+            class P:
+                returncode = 0
+                async def communicate(self): return (b"", b"")
+            return P()
+
+        with mock.patch.object(tmux_runner.asyncio, "create_subprocess_exec", fake_exec):
+            await tmux_runner.scroll_pane("p1", "up")
+        # copy-mode first: send-keys -X outside copy-mode does nothing.
+        self.assertEqual(calls[0], ("tmux", "copy-mode", "-t", "p1"))
+        self.assertEqual(calls[1],
+                         ("tmux", "send-keys", "-t", "p1", "-X", "halfpage-up"))
+
+    async def test_bottom_cancels_copy_mode_and_does_not_enter_it(self):
+        calls: list[tuple[str, ...]] = []
+
+        async def fake_exec(*args, **kw):
+            calls.append(args)
+            class P:
+                returncode = 0
+                async def communicate(self): return (b"", b"")
+            return P()
+
+        with mock.patch.object(tmux_runner.asyncio, "create_subprocess_exec", fake_exec):
+            await tmux_runner.scroll_pane("p1", "bottom")
+        # Exactly one command, and NOT copy-mode: entering it to immediately
+        # cancel would flicker the pane out of following live output.
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0], ("tmux", "send-keys", "-t", "p1", "-X", "cancel"))
