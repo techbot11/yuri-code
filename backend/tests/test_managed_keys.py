@@ -108,3 +108,61 @@ class Status(unittest.TestCase):
         rows = config.managed_status()
         self.assertEqual([r["name"] for r in rows],
                          [k.name for k in config.MANAGED_KEYS])
+
+
+class EnvFilesChecked(unittest.TestCase):
+    """env_files_checked() / missing_key_detail() -- the diagnostic whose
+    entire job is to say every place config.py actually looked. This had no
+    coverage at all before round 2, which is how round 1 added a third .env
+    source (the Setup-writable $YURI_HOME/config/.env) without this string
+    ever being taught to mention it."""
+
+    def test_a_plain_clone_names_backend_and_yuri_home_but_not_homebrew(self):
+        with mock.patch.object(config, "_CONFIG_ENV", None), \
+             mock.patch.object(config, "_CONFIG_ENV_DISPLAY", None):
+            text = config.env_files_checked()
+        self.assertIn("backend/.env", text)
+        self.assertIn(config._YURI_HOME_ENV_DISPLAY, text)
+        self.assertNotIn("yapcode", text.lower())
+
+    def test_a_homebrew_install_names_all_three_in_load_order(self):
+        with mock.patch.object(config, "_CONFIG_ENV", "/fake/homebrew/.env"), \
+             mock.patch.object(config, "_CONFIG_ENV_DISPLAY", "~/.config/yapcode/.env"):
+            text = config.env_files_checked()
+        self.assertIn("~/.config/yapcode/.env", text)
+        self.assertIn(config._YURI_HOME_ENV_DISPLAY, text)
+        self.assertIn("backend/.env", text)
+        # Load (and precedence) order: the out-of-tree config dir first,
+        # then the dir PUT /yuri/config writes to, then backend/.env last.
+        i_config_dir = text.index("~/.config/yapcode/.env")
+        i_yuri_home = text.index(config._YURI_HOME_ENV_DISPLAY)
+        i_backend = text.index("backend/.env")
+        self.assertLess(i_config_dir, i_yuri_home)
+        self.assertLess(i_yuri_home, i_backend)
+
+    def test_missing_key_detail_names_the_var_and_every_location_no_secret(self):
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": SECRET}, clear=False), \
+             mock.patch.object(config, "_CONFIG_ENV", "/fake/homebrew/.env"), \
+             mock.patch.object(config, "_CONFIG_ENV_DISPLAY", "~/.config/yapcode/.env"):
+            locations = config.env_files_checked()
+            detail = config.missing_key_detail("GEMINI_API_KEY")
+        self.assertIn("GEMINI_API_KEY", detail)
+        # Every location env_files_checked() names must show up in the
+        # detail text too -- it's built by embedding that string verbatim.
+        self.assertIn(locations, detail)
+        self.assertNotIn(SECRET, detail)
+
+    def test_the_location_count_matches_the_number_of_env_files_actually_loaded(self):
+        # Pins the two counts together: a fourth `_load_env_file(...)` call
+        # site added to the loader without teaching this string about a
+        # fourth location is exactly the bug this whole class exists to
+        # catch -- this is the test that would have caught it.
+        import inspect
+        import re
+        src = inspect.getsource(config)
+        head = src[:src.index("VOICE_KEY_VARS")]
+        call_sites = len(re.findall(r"_load_env_file\(_[A-Z]", head))
+        with mock.patch.object(config, "_CONFIG_ENV", "/fake/homebrew/.env"), \
+             mock.patch.object(config, "_CONFIG_ENV_DISPLAY", "~/.config/yapcode/.env"):
+            text = config.env_files_checked()
+        self.assertEqual(text.count(" and ") + 1, call_sites)

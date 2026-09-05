@@ -113,11 +113,19 @@ def voice_keys_found() -> list[tuple[str, str]]:
 
 
 def env_files_checked() -> str:
-    """Human-readable list of the .env locations consulted, with presence."""
-    parts = [f"backend/.env ({'present' if os.path.isfile(_BACKEND_ENV) else 'not present'})"]
+    """Human-readable list of the .env locations consulted, with presence, in
+    the SAME order config.py loads them -- so this string reads as the
+    search order it describes, rather than a list a future fourth source
+    could silently fall out of. The out-of-tree Homebrew dir is only listed
+    when it applies (YAPCODE_CONFIG_DIR set), matching the module
+    docstring's Config location section; the other two are unconditional."""
+    parts = []
     if _CONFIG_ENV:  # only relevant for a Homebrew (YAPCODE_CONFIG_DIR) install
         parts.append(f"{_CONFIG_ENV_DISPLAY} "
                      f"({'present' if os.path.isfile(_CONFIG_ENV) else 'not found'})")
+    parts.append(f"{_YURI_HOME_ENV_DISPLAY} "
+                 f"({'present' if os.path.isfile(_YURI_HOME_ENV) else 'not present'})")
+    parts.append(f"backend/.env ({'present' if os.path.isfile(_BACKEND_ENV) else 'not present'})")
     return " and ".join(parts)
 
 
