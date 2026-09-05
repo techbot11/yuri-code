@@ -12,6 +12,7 @@ of depending on when an asyncio task happens to be scheduled.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -21,6 +22,7 @@ from unittest import mock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import config  # noqa: E402
+from yuri.domain.task import TERMINAL_TASK  # noqa: E402
 from yuri import app as yapp  # noqa: E402
 from yuri.domain.artifact import Artifact  # noqa: E402
 from yuri.domain.session import AgentSession  # noqa: E402
@@ -450,3 +452,118 @@ class DriverLoopTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PollOnlyProviderTests(unittest.IsolatedAsyncioTestCase):
+    """A workflow must advance for an agent that cannot push events.
+
+    THE gap the Phase 7 live acceptance run found, and that 1,541 tests
+    missed. OpenCode is poll-only — `supports_events=False`, and its
+    `set_observer` stores the callback and never invokes it. Only
+    `SessionService.poll()` publishes `turn_completed` for such a provider,
+    and WorkflowDispatcher is entirely event-driven, so nothing joined them:
+    the only poller in the system was the BROWSER's loop.
+
+    A task dispatched to an OpenCode specialist therefore advanced only while
+    a page was open, and otherwise hung until MAX_MISSION_RUNTIME_S. A
+    background mission that only runs in the foreground is not one.
+
+    Every existing workflow test used FakeAgentProvider, which pushes.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.mkdir(os.path.join(self.tmp.name, "proj"))
+        self.patches = [
+            mock.patch.dict(os.environ, {"ALLOWED_PROJECT_ROOTS": self.tmp.name}),
+            mock.patch.object(config, "YURI_HOME", os.path.join(self.tmp.name, "Yuri")),
+        ]
+        [p.start() for p in self.patches]
+        # The whole point: a provider that does NOT push.
+        self.fake = FakeAgentProvider(supports_events=False)
+        self.c = yapp.test_container(os.path.join(self.tmp.name, "Yuri"), self.fake)
+        self.project = self.c.projects.resolve_or_create("proj")
+        self.mission = self.c.missions.create(self.project, "Fix billing", created_by="voice",
+                                              goal="the invoice totals are wrong")
+        self.addCleanup(self.tmp.cleanup)
+
+    def tearDown(self):
+        yapp.set_container(None)
+        self.c.store.close()
+        [p.stop() for p in self.patches]
+
+    async def _dispatched_task(self):
+        w = await self.c.workflow.create(self.mission, "single", goal="fix it")
+        await self.c.workflow.resume(w.id)
+        await self.c.workflow.advance(w.id)
+        [t] = self.c.workflow.tasks_of(w.id)
+        return w, t
+
+    async def test_a_poll_only_provider_is_listed_for_polling(self):
+        _, t = await self._dispatched_task()
+        self.assertEqual(t.status, "dispatched")
+        handles = self.c.dispatcher._needs_polling()
+        self.assertEqual(len(handles), 1, "an in-flight poll-only task was not queued for polling")
+
+    async def test_a_pushing_provider_is_never_polled(self):
+        # Polling one would double-report the turn, and on_task_finished is
+        # only idempotent against a STALE report, not the same live one twice.
+        pushing = FakeAgentProvider(supports_events=True)
+        yapp.set_container(None)
+        self.c.store.close()
+        self.c = yapp.test_container(os.path.join(self.tmp.name, "Yuri2"), pushing)
+        self.project = self.c.projects.resolve_or_create("proj")
+        self.mission = self.c.missions.create(self.project, "m", created_by="voice", goal="g")
+        await self._dispatched_task()
+        self.assertEqual(self.c.dispatcher._needs_polling(), [])
+
+    async def test_polling_carries_the_task_to_completion(self):
+        """End to end: poll -> turn_completed -> the driver advances.
+
+        The bus is drained by hand rather than by starting the real loops,
+        the way every other test in this file does it — the loops have their
+        own test above, and driving them here would make this depend on
+        timing.
+        """
+        w, t = await self._dispatched_task()
+        q = self.c.bus.subscribe()
+        # The fake stays "working" until told the turn finished, which is what
+        # a real agent's poll reports once it is done.
+        self.fake.script("fake-1", {"status": "completed", "assistant_text": "fixed it"})
+
+        self.assertEqual(await self.c.dispatcher._poll_once(), 1)
+
+        # The poll published turn_completed; the driver is what acts on it.
+        for _ in range(6):
+            if q.empty():
+                break
+            while not q.empty():
+                await self.c.dispatcher.on_event(q.get_nowait())
+        self.c.bus.unsubscribe(q)
+        self.assertEqual(self.c.workflow.get_task(t.id).status, "completed")
+
+    async def test_a_terminal_task_is_not_polled(self):
+        w, t = await self._dispatched_task()
+        await self.c.workflow.on_task_finished(t.id, ok=True, result={"assistant_text": "done"})
+        self.assertEqual(self.c.dispatcher._needs_polling(), [])
+
+    async def test_an_unreachable_agent_does_not_stop_the_others(self):
+        await self._dispatched_task()
+
+        def boom(handle):          # sync: SessionService.poll is not a coroutine
+            raise RuntimeError("unreachable")
+        original = self.c.sessions.poll
+        self.c.sessions.poll = boom
+        try:
+            self.assertEqual(await self.c.dispatcher._poll_once(), 0)   # no exception
+        finally:
+            self.c.sessions.poll = original
+
+    async def test_the_poller_starts_and_stops_with_the_driver(self):
+        self.c.dispatcher.start()
+        self.assertIsNotNone(self.c.dispatcher._poll_task)
+        await self.c.dispatcher.stop()
+        self.assertIsNone(self.c.dispatcher._poll_task)
+
+    async def test_stop_is_safe_when_it_never_started(self):
+        await self.c.dispatcher.stop()      # no exception

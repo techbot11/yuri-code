@@ -45,6 +45,7 @@ from yuri.domain.task import TERMINAL_TASK, Task
 from yuri.domain.workflow import Workflow
 from yuri.events.bus import EventBus
 from yuri.services.sessions import SessionService
+from yuri.services.workflow import IN_FLIGHT
 from yuri.services.workflow import (IN_FLIGHT, MAX_SESSIONS_PER_MISSION, WorkflowBound,
                                     WorkflowEngine)
 from yuri.store.base import Store
@@ -69,6 +70,28 @@ LOST_REASON = ("the agent process did not survive a backend restart, so this tas
 # stored as JSON on the row and read back into a handoff (spec §9).
 RESULT_TEXT_MAX = 2000
 
+# How often the driver polls the sessions of in-flight tasks whose provider
+# does not push events.
+#
+# WHY THIS EXISTS, found by the Phase 7 live acceptance run and by nothing
+# else: OpenCode is poll-only (`supports_events=False`, and its `set_observer`
+# stores the callback and never invokes it). SessionService.poll() is what
+# publishes `session.turn_completed` for such a provider — gated on
+# `emits = not supports_events` — and this driver is entirely event-driven.
+#
+# So nothing connected the two. The only poller in the system was the
+# BROWSER's loop, which meant a workflow task dispatched to an OpenCode
+# specialist advanced only while a page was open, and hung until
+# MAX_MISSION_RUNTIME_S otherwise. A background mission that only runs in the
+# foreground is not a background mission.
+#
+# Every workflow test missed it because FakeAgentProvider pushes
+# (supports_events=True), so the fake's turns always completed.
+#
+# 3s rather than the browser's 1.5s: this is a fallback for agents that cannot
+# tell us, not a UI refresh, and it costs one HTTP call per in-flight task.
+POLL_INTERVAL_S = 3.0
+
 
 class WorkflowDispatcher:
     def __init__(self, store: Store, bus: EventBus, sessions: SessionService,
@@ -79,6 +102,7 @@ class WorkflowDispatcher:
         self.engine = engine
         self._q: asyncio.Queue | None = None
         self._loop_task: asyncio.Task | None = None
+        self._poll_task: asyncio.Task | None = None
 
     # --- the engine's dispatch hook ---------------------------------------
 
@@ -391,6 +415,7 @@ class WorkflowDispatcher:
             return
         self._q = self.bus.subscribe()
         self._loop_task = asyncio.create_task(self._run(), name="yuri-workflow-driver")
+        self._poll_task = asyncio.create_task(self._poll_loop(), name="yuri-workflow-poller")
 
     def running(self) -> bool:
         return self._loop_task is not None and not self._loop_task.done()
@@ -398,6 +423,10 @@ class WorkflowDispatcher:
     async def stop(self) -> None:
         """Unsubscribe and stop consuming. Safe on a driver that never started,
         and safe to call twice (shutdown() is)."""
+        poller, self._poll_task = self._poll_task, None
+        if poller is not None:
+            poller.cancel()
+            await asyncio.wait({poller})
         task, self._loop_task = self._loop_task, None
         q, self._q = self._q, None
         if q is not None:
@@ -411,6 +440,63 @@ class WorkflowDispatcher:
         await asyncio.wait({task})
         if not task.cancelled() and task.exception() is not None:
             log.error("the workflow driver exited with an error", exc_info=task.exception())
+
+    # --- polling the agents that cannot tell us ---------------------------
+
+    def _needs_polling(self) -> list[str]:
+        """Native handles of in-flight tasks whose provider does not push.
+
+        Reads the store rather than holding state, so a restart mid-mission
+        picks the work back up — the same reasoning `reconcile()` follows.
+        """
+        out: list[str] = []
+        for w in self.store.workflows.live():
+            for t in self.store.tasks.for_workflow(w.id):
+                if t.status not in IN_FLIGHT or not t.session_id:
+                    continue
+                row = self.store.sessions.get(t.session_id)
+                if row is None or not row.is_live:
+                    continue
+                try:
+                    provider = self.sessions.registry.get(row.agent_id or "")
+                except KeyError:
+                    continue
+                if provider.capabilities().supports_events:
+                    continue          # its observer already tells us
+                out.append(row.native_session_id)
+        return out
+
+    async def _poll_once(self) -> int:
+        """Poll each handle once. `poll()` publishes turn_completed/agent.error
+        for a poll-only provider, and this driver's own subscriber then
+        advances the workflow — so this closes the loop without a second code
+        path for "what a finished turn means"."""
+        polled = 0
+        for handle in self._needs_polling():
+            try:
+                # `poll` is SYNCHRONOUS and makes a blocking HTTP call to the
+                # agent, so it goes to a thread: running it inline would stall
+                # this driver — and therefore every other task's events —
+                # for the duration of one agent's round trip. The store is
+                # built for this (a connection per thread, threading.local).
+                await asyncio.to_thread(self.sessions.poll, handle)
+                polled += 1
+            except Exception:                              # noqa: BLE001
+                # One unreachable agent must not stop the others being polled,
+                # and a poll that raises is not a task failure — the next tick
+                # tries again.
+                log.debug("workflow poller: %s did not answer", handle, exc_info=True)
+        return polled
+
+    async def _poll_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(POLL_INTERVAL_S)
+                await self._poll_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:                              # noqa: BLE001
+                log.exception("workflow poller: a tick failed")
 
     async def _run(self) -> None:
         q = self._q
