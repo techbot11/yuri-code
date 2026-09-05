@@ -682,12 +682,21 @@ export function repoRoot(): string {
 
 const children: ChildProcess[] = [];
 let lastStderr: Record<string, string> = {};
+let died: Record<string, boolean> = {};
 
 /** Wait for a URL to answer with any HTTP status. "Any" is the point: a 401
  *  or a 404 both prove the server is up, and only a connection refusal means
- *  it is not. */
-async function waitForHttp(url: string, deadline: number): Promise<boolean> {
+ *  it is not.
+ *
+ *  `isDead` is what keeps a failed boot fast. The common failures -- a port
+ *  already in use, a missing dependency -- kill the child in under a second,
+ *  and polling on to the 60s deadline would leave the boot window saying
+ *  "starting" for a minute while the stderr that explains it is already
+ *  captured. */
+async function waitForHttp(url: string, deadline: number,
+                           isDead: () => boolean): Promise<boolean> {
   while (Date.now() < deadline) {
+    if (isDead()) return false;
     try {
       await fetch(url, { method: "GET" });
       return true;
@@ -710,6 +719,7 @@ function track(name: "backend" | "frontend", child: ChildProcess,
   child.stdout?.on("data", keep);
   child.stderr?.on("data", keep);
   child.on("exit", (code) => {
+    died[name] = true;
     // An exit BEFORE ready is a boot failure; after ready it is a crash the
     // app has to survive, and 2b's supervisor owns restarting it.
     if (code !== 0) {
@@ -747,11 +757,13 @@ export async function startServers(env: Env,
   // backend to LISTEN, only to answer proxied requests, so serialising the
   // two would add the backend's start time to every boot for no reason.
   await Promise.all([
-    waitForHttp(`http://127.0.0.1:${BACKEND_PORT}/health`, deadline).then((up) =>
+    waitForHttp(`http://127.0.0.1:${BACKEND_PORT}/health`, deadline,
+                () => died.backend).then((up) =>
       onEvent(up ? { type: "ready", child: "backend" }
                  : { type: "failed", child: "backend",
                      detail: lastStderr.backend.trim() || "the backend never answered" })),
-    waitForHttp(`http://127.0.0.1:${FRONTEND_PORT}/`, deadline).then((up) =>
+    waitForHttp(`http://127.0.0.1:${FRONTEND_PORT}/`, deadline,
+                () => died.frontend).then((up) =>
       onEvent(up ? { type: "ready", child: "frontend" }
                  : { type: "failed", child: "frontend",
                      detail: lastStderr.frontend.trim() || "the frontend never answered" })),
@@ -773,6 +785,7 @@ export async function stopServers(): Promise<void> {
   }
   children.length = 0;
   lastStderr = {};
+  died = {};
 }
 ```
 
@@ -838,7 +851,22 @@ Expected: the window appears with Yuri, no terminal involved. Then quit with ⌘
 lsof -ti tcp:8000 -sTCP:LISTEN; lsof -ti tcp:3000 -sTCP:LISTEN   # both empty
 ```
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 8: Verify a failed boot reports FAST, not after the deadline**
+
+The common failures kill a child in under a second, and the boot must say so
+then rather than polling on for a minute.
+
+```bash
+python3 -m http.server 8000 &          # occupy the backend's port
+time npm --prefix desktop run dev      # note how long before it reports
+kill %1
+```
+
+Expected: it reports the backend failure in a few seconds, not ~60. The
+`HEALTH_TIMEOUT_MS` deadline is the ceiling for a server that is merely slow,
+not the time a dead one takes to notice.
+
+- [ ] **Step 9: Commit**
 
 ```bash
 git add desktop/lib/boot.ts desktop/lib/boot.test.ts desktop/main/servers.ts desktop/main/index.ts
@@ -1370,12 +1398,39 @@ Call `createTray()` in `app.whenReady()`, and add the IPC listener:
   });
 ```
 
-Add `TRAY_STATES` to `desktop/lib/tray.ts` and a test that it matches the type:
+Add `TRAY_STATES` to `desktop/lib/tray.ts`:
 
 ```ts
+/** Every state, for validating what a renderer sends. The IPC handler checks
+ *  against this, so a value missing here silently ignores a real state and a
+ *  value that is not a TrayState would blank the icon. */
 export const TRAY_STATES: TrayState[] =
   ["asleep", "listening", "speaking", "working", "needs-you"];
 ```
+
+And append this test to `desktop/lib/tray.test.ts`:
+
+```ts
+test("TRAY_STATES covers every state trayState can return", () => {
+  // The IPC handler validates against this list, so a state missing from it
+  // is a state the tray silently refuses to show.
+  const reachable = new Set<TrayState>([
+    trayState(facts()),
+    trayState(facts({ voiceConnected: true })),
+    trayState(facts({ voiceConnected: true, speaking: true })),
+    trayState(facts({ missionsRunning: 1 })),
+    trayState(facts({ approvalsPending: 1 })),
+  ]);
+  for (const s of reachable) {
+    assert.ok(TRAY_STATES.includes(s), `${s} is reachable but not in TRAY_STATES`);
+  }
+  assert.equal(TRAY_STATES.length, reachable.size,
+    "TRAY_STATES has an entry no input can produce, or is missing one");
+  assert.equal(new Set(TRAY_STATES).size, TRAY_STATES.length, "no duplicates");
+});
+```
+
+Extend that file's import to `import { TRAY_STATES, trayLabel, trayState, type TrayFacts, type TrayState } from "./tray.ts";`.
 
 Extend the imports with `Menu`, `Tray`, `nativeImage`, and `TRAY_STATES`, `trayLabel`, `type TrayState` from `../lib/tray`.
 
@@ -1478,7 +1533,7 @@ git commit -m "feat(desktop): a tray that says what she is doing"
 ## Task 6: One command that runs the app, and the docs to match
 
 **Files:**
-- Modify: `desktop/package.json`, `bin/yuri`, `README.md`
+- Modify: `bin/yuri`, `README.md`
 
 **Interfaces:**
 - Consumes: everything above.
@@ -1549,7 +1604,7 @@ comes next.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add bin/yuri README.md desktop/package.json
+git add bin/yuri README.md
 git commit -m "feat(desktop): yuri app launches the shell"
 ```
 
