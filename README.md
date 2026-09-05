@@ -275,6 +275,19 @@ anything, edit the file or run `yapcode config`.
 `yapcode -h` / `--help` prints `usage: yapcode {up|session [dir]|config}`. An unknown
 subcommand prints usage to stderr and exits `2`.
 
+### As a desktop app
+
+    yuri app
+
+Opens Yuri in her own window — no terminal, no browser tab. She keeps running
+when you close the window: the tray icon shows what she is doing, and only
+Quit stops her.
+
+This runs the same two servers `yuri up` does, so the two cannot run at once.
+It is not yet a `.dmg` you can hand to someone else — it uses this clone's
+`backend/.venv` and needs `claude` and `tmux` installed as usual. Packaging
+comes next.
+
 ---
 
 ## Install with Homebrew

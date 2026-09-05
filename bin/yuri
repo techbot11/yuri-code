@@ -1,9 +1,27 @@
 #!/usr/bin/env bash
-# yuri — primary launcher. `yuri doctor` runs environment checks; every other
-# subcommand is delegated to the compatibility launcher `yapcode` (up / session /
-# config) so nothing existing changes (plan §29).
+# yuri — primary launcher. `yuri doctor` runs environment checks; `yuri app`
+# launches the desktop shell; every other subcommand is delegated to the
+# compatibility launcher `yapcode` (up / session / config) so nothing
+# existing changes (plan §29).
 set -euo pipefail
 APP_ROOT="${YAPCODE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
+# A port from the environment, or FALLBACK if the value is empty, non-numeric,
+# or outside the valid TCP range. Mirrors desktop/lib/ports.ts's parsePort()
+# so `yuri app`'s port guard and build check agree with the ports the shell
+# itself will actually bind — a silent fallback on a typo'd port would waste
+# far more time than a clear rejection.
+port_from_env() {
+  local value="$1" fallback="$2"
+  case "$value" in
+    ''|*[!0-9]*) printf '%s' "$fallback"; return ;;
+  esac
+  if [ "$value" -gt 0 ] && [ "$value" -lt 65536 ]; then
+    printf '%s' "$value"
+  else
+    printf '%s' "$fallback"
+  fi
+}
 
 case "${1:-up}" in
   doctor)
@@ -11,8 +29,50 @@ case "${1:-up}" in
     PY="./.venv/bin/python"; [ -x "$PY" ] || PY="python3"
     exec "$PY" -m yuri.doctor
     ;;
+  app)
+    # The desktop shell. It supervises the same two servers `up` starts, so
+    # running both at once would fight over ports. desktop/lib/ports.ts
+    # resolves the ports it actually binds from YURI_DESKTOP_BACKEND_PORT /
+    # YURI_DESKTOP_FRONTEND_PORT (falling back to 8000/3000) — read the same
+    # two variables here with the same defaults, so the guard checks the
+    # ports the shell will actually use rather than always the defaults.
+    BACKEND_PORT="$(port_from_env "${YURI_DESKTOP_BACKEND_PORT:-}" 8000)"
+    FRONTEND_PORT="$(port_from_env "${YURI_DESKTOP_FRONTEND_PORT:-}" 3000)"
+    for port in "$BACKEND_PORT" "$FRONTEND_PORT"; do
+      if lsof -ti "tcp:$port" -sTCP:LISTEN >/dev/null 2>&1; then
+        printf 'yuri: port %s is already in use — stop `yuri up` first\n' "$port" >&2
+        exit 1
+      fi
+    done
+    # `next start` needs a production build; `next dev` is not what the shell
+    # runs. But presence of a build is not enough: frontend/next.config.mjs
+    # INLINES BACKEND_URL/BACKEND_PORT at `next build` time (Next does not
+    # read them at `next start`), so a build made for a different backend
+    # port would silently keep proxying to the wrong one. A stamp file
+    # records which BACKEND_URL the last build was made for; a missing or
+    # mismatched stamp forces a rebuild rather than warning, because a
+    # warning would leave the wrong build running.
+    BACKEND_URL="http://localhost:$BACKEND_PORT"
+    BUILD_STAMP="$APP_ROOT/frontend/.next/yuri-app-backend-url"
+    NEED_BUILD=0
+    if [ ! -f "$APP_ROOT/frontend/.next/BUILD_ID" ]; then
+      NEED_BUILD=1
+    elif [ "$(cat "$BUILD_STAMP" 2>/dev/null || true)" != "$BACKEND_URL" ]; then
+      NEED_BUILD=1
+    fi
+    if [ "$NEED_BUILD" -eq 1 ]; then
+      printf 'yuri: building the interface for %s (first run, or a different backend port)\n' "$BACKEND_URL" >&2
+      ( cd "$APP_ROOT/frontend" && BACKEND_URL="$BACKEND_URL" BACKEND_PORT="$BACKEND_PORT" npm run build ) || exit 1
+      printf '%s' "$BACKEND_URL" > "$BUILD_STAMP"
+    fi
+    if [ ! -d "$APP_ROOT/desktop/node_modules" ]; then
+      printf 'yuri: installing the desktop shell (first run)\n' >&2
+      ( cd "$APP_ROOT/desktop" && npm install ) || exit 1
+    fi
+    exec npm --prefix "$APP_ROOT/desktop" run dev
+    ;;
   -h|--help|help)
-    printf '%s\n' "usage: yuri {up|doctor|session [dir]|config}" >&2
+    printf '%s\n' "usage: yuri {up|app|doctor|session [dir]|config}" >&2
     ;;
   *)
     exec "$APP_ROOT/bin/yapcode" "$@"
