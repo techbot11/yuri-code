@@ -174,16 +174,27 @@ function minimalPageUrl(opts: { failed: boolean; detail: string }): string {
  *  loaded (dropped; there is no listener yet, and the eventual load of the
  *  minimal page bakes in the state already known at that point instead of
  *  relying on a push landing before its listener exists). */
+/** The last payload pushed, kept so a renderer that mounts LATER can still
+ *  learn the current state. Every state change here happens before the
+ *  window's JS runs -- the environment resolves, both children spawn, and
+ *  the frontend reports ready, all before a React effect has subscribed --
+ *  so a channel with no replay delivers the boot's whole story to nobody.
+ *  That is not a rare race; it is the normal order of events. */
+let lastBoot: unknown = null;
+
 function pushBoot(state: BootState, env: ChildState, envDetail = ""): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.webContents.send("boot:state", {
+  // Recorded BEFORE the window guard: the pushes that arrive with no window
+  // yet are exactly the ones a late subscriber needs replayed.
+  lastBoot = {
     phase: env === "failed" ? "failed" : bootPhase(state),
     env,
     envDetail,
     backend: state.backend,
     frontend: state.frontend,
     errorDetail: state.error?.detail || "",
-  });
+  };
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("boot:state", lastBoot);
 }
 
 /** Wait for the FRONTEND only, then show it -- the backend wait is now the
@@ -300,6 +311,10 @@ app.whenReady().then(async () => {
   await boot().catch((err) => {
     console.error("[yuri] boot() rejected:", err instanceof Error ? err.message : err);
   });
+
+  // Replay for a renderer that subscribed after the fact. Returns null when
+  // nothing has been pushed yet, which the preload treats as "no news".
+  ipcMain.handle("boot:current", () => lastBoot);
 
   ipcMain.on("boot:retry", () => {
     void restart().catch((err) => {
