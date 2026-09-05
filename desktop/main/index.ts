@@ -4,7 +4,7 @@
 // notices -- which environment the children get, whether the boot is ready
 // or failed, which tray state a set of facts means -- lives in ../lib as a
 // pure function with tests, because there is no Electron test environment.
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, shell, Tray } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, shell } from "electron";
 import * as path from "node:path";
 import {
   applyBootEvent,
@@ -16,9 +16,9 @@ import {
 import { mergeEnv, withFallbackPath, type Env } from "../lib/env";
 import { isAppUrl } from "../lib/urls";
 import { portsFromEnv } from "../lib/ports";
-import { TRAY_STATES, trayLabel, type TrayState } from "../lib/tray";
 import { startServers, stopServers } from "./servers";
 import { homeDir, probeLoginEnv } from "./shellEnv";
+import { createTray, setTrayState } from "./tray";
 
 // Overridable so a verification run can point the shell at other ports
 // without fighting a `bin/yuri up` the developer already has running; absent,
@@ -181,66 +181,11 @@ export function showMainWindow(): void {
   mainWindow.focus();
 }
 
-let tray: Tray | null = null;
-let currentTrayState: TrayState = "asleep";
-// This Electron version's Tray has no getContextMenu() to read back what was
-// set, so the verification harness (no automated Electron test environment
-// exists) needs its own way to inspect the menu just built -- kept alongside
-// `tray` for the same reason.
-let lastTrayMenu: Menu | null = null;
-
-function iconFor(state: TrayState): Electron.NativeImage {
-  const img = nativeImage.createFromPath(
-    path.join(__dirname, `../assets/${state}Template@2x.png`));
-  // Marking it a template is what makes macOS tint it for the menu bar's
-  // light and dark appearance; an untinted icon is invisible in one of them.
-  img.setTemplateImage(true);
-  return img;
-}
-
-function refreshTray(): void {
-  if (!tray) return;
-  tray.setImage(iconFor(currentTrayState));
-  tray.setToolTip(`Yuri — ${trayLabel(currentTrayState)}`);
-  lastTrayMenu = Menu.buildFromTemplate([
-    { label: trayLabel(currentTrayState), enabled: false },
-    { type: "separator" },
-    { label: "Show Yuri", click: () => showMainWindow() },
-    // Just app.quit(). Setting `quitting` here would make before-quit's own
-    // re-entry guard skip the drain and orphan both children holding their
-    // ports -- measured, from the boot page's Quit button doing exactly that.
-    { label: "Quit Yuri", click: () => app.quit() },
-  ]);
-  tray.setContextMenu(lastTrayMenu);
-}
-
-function createTray(): void {
-  tray = new Tray(iconFor("asleep"));
-  // A left click shows her, which is what a tray icon should do; the menu is
-  // on right-click, per the platform.
-  tray.on("click", () => showMainWindow());
-  refreshTray();
-}
-
-// Exposed only for the verification harness -- there is no automated
-// Electron test environment, so lib/tray.ts carries the actual logic under
-// `node --test` and this just lets a driving script assert on the live Tray
-// and state without a real renderer to send tray:state over IPC.
-export function _trayForVerification(): Tray | null {
-  return tray;
-}
-export function _trayStateForVerification(): TrayState {
-  return currentTrayState;
-}
-export function _trayMenuForVerification(): Menu | null {
-  return lastTrayMenu;
-}
-
 app.whenReady().then(async () => {
   // Before the boot window, not after: her presence in the menu bar should
   // not wait on a successful boot, and a failed boot still leaves a tray
   // behind to show something is wrong.
-  createTray();
+  createTray(showMainWindow);
 
   bootWindow = createBootWindow();
   // Wait for the page before pushing state, or the first push lands nowhere.
@@ -269,13 +214,7 @@ app.whenReady().then(async () => {
     app.quit();
   });
 
-  ipcMain.on("tray:state", (_e, state: TrayState) => {
-    // Trust nothing from a renderer: an unknown string would blank the icon.
-    if (!TRAY_STATES.includes(state)) return;
-    if (state === currentTrayState) return;   // avoid rebuilding the menu on every poll
-    currentTrayState = state;
-    refreshTray();
-  });
+  ipcMain.on("tray:state", (_e, state: string) => setTrayState(state));
 
   globalShortcut.register("CommandOrControl+Shift+Y", () => showMainWindow());
 });
