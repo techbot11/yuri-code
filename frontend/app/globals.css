@@ -4597,3 +4597,68 @@ a.miss-row {
 .engines-view {
    min-width: 0;
 }
+
+/* --- Setup: the checks, and the keys ------------------------------------- */
+.setup, .setup-view { min-width: 0; }
+
+.setup-checks {
+   display: flex;
+   flex-direction: column;
+   gap: 6px;
+   margin-top: 4px;
+}
+
+/* A failing REQUIRED check and a failing optional one must not look the same:
+   one stops her, the other costs a feature. */
+.setup-check {
+   display: grid;
+   grid-template-columns: 110px 1fr;
+   gap: 4px 12px;
+   align-items: baseline;
+   padding: 7px 10px;
+   border: 1px solid var(--line);
+   border-left-width: 3px;
+   border-radius: 8px;
+   min-width: 0;
+}
+
+.setup-check.ok   { border-left-color: var(--good); }
+.setup-check.bad  { border-left-color: var(--danger); }
+.setup-check.warn { border-left-color: var(--warn); }
+
+.setup-check-name {
+   font-family: var(--disp);
+   text-transform: uppercase;
+   letter-spacing: 0.06em;
+   font-size: 10px;
+   color: var(--mut);
+}
+
+.setup-check-detail {
+   font-family: var(--mono);
+   font-size: 12px;
+   color: var(--ink);
+   overflow-wrap: anywhere;
+}
+
+.setup-check .tf-hint { grid-column: 2; }
+
+.setup-keys {
+   display: flex;
+   flex-direction: column;
+   gap: 4px;
+}
+
+.setup-hint {
+   font-family: var(--mono);
+   text-transform: none;
+   letter-spacing: 0;
+   color: var(--dim);
+}
+
+.setup-saved {
+   display: block;
+   margin-top: 10px;
+   font-size: 12px;
+   color: var(--good);
+}

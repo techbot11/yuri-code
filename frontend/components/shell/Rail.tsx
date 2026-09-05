@@ -35,6 +35,8 @@ const ROUTES: Route[] = [
     icon: <><path d="M12 3a4 4 0 0 0-4 4v1a3 3 0 0 0 0 6v1a4 4 0 0 0 8 0v-1a3 3 0 0 0 0-6V7a4 4 0 0 0-4-4Z" /><path d="M12 3v18" /></> },
   { href: "/activity", label: "Activity",
     icon: <path d="M3 13h3.6l2-5.5 3 11L17 6.5l1.7 6.5H21" /> },
+  { href: "/setup", label: "Setup",
+    icon: <><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2" /></> },
 ];
 
 export function Rail() {
