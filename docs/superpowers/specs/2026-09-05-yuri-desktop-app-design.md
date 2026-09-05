@@ -38,7 +38,7 @@ Measured, not assumed — these facts decide the design.
 | Python | 3.14.7, venv at `backend/.venv` | Yes, relocatable build |
 | Native wheels | `pydantic_core`, `rpds`, `_cffi_backend`, `charset_normalizer`, `websockets` | Yes, but **arch-specific** |
 | Node | Next 16 server, five route handlers under `app/api/` | Not needed separately — see §4.2 |
-| `claude` CLI | Required by **both** agent backends. `claude_agent_sdk` resolves it with `shutil.which("claude")` (`_internal/transport/subprocess_cli.py:89`), so the SDK path needs it too | **No** — authenticated product |
+| `claude` CLI | Required by both backends, but resolved differently — see §2.1. The `cli`/tmux backend needs it on `PATH`; the `sdk` backend ships its own copy inside the wheel | Partly — already is, for the SDK path |
 | `tmux` | Required by the `cli` backend, which provides the live terminal pane | No (system tool) |
 | `opencode` | Optional, already gated by `YURI_AGENTS` | No |
 | Microphone | `getUserMedia` in the renderer; Gemini Live uses `AudioWorklet` + WebSocket, OpenAI Realtime uses `RTCPeerConnection` | n/a |
@@ -48,9 +48,36 @@ Two consequences worth stating plainly:
 - **Voice needs a real Chromium.** Both transports run in the renderer, and one is full WebRTC.
   Electron bundles Chromium, so this is certain. A WKWebView shell (Tauri) puts it at risk on
   macOS specifically; that is the main reason this spec chooses Electron over the smaller binary.
-- **`claude` can never be bundled**, on either platform, under either backend. The app will
-  always require the user to have installed and authenticated Claude Code. `yuri doctor` already
-  checks this and becomes the first-run gate (§6.2).
+- **The user must still have authenticated Claude Code**, because a bundled binary carries no
+  credentials — but the *binary* is not what the app has to provide for the SDK path. `yuri
+  doctor` already checks this and becomes the first-run gate (§6.2).
+
+### 2.1 How `claude` is resolved, and a live inconsistency it causes
+
+Measured against `claude_agent_sdk==0.2.87`. `SubprocessCLITransport._find_cli()`
+(`_internal/transport/subprocess_cli.py:81-112`) tries, in order:
+
+1. `_bundled/claude` **inside the installed wheel** — a 204 MB executable the SDK ships
+2. `shutil.which("claude")`
+3. six absolute fallbacks, including `~/.claude/local/claude` and `/usr/local/bin/claude`
+
+Three consequences:
+
+- **The SDK backend does not need `claude` on `PATH` at all.** Step 1 wins, and steps 3's absolute
+  paths would cover a launchd environment anyway. §5's `PATH` problem therefore bites only the
+  `cli`/tmux backend and the `tmux` lookup itself — a narrower blast radius than first assumed,
+  but not zero.
+- **The bundle is much larger than a stripped interpreter suggests.** Measured: 25 MB download,
+  68 MB unpacked interpreter, **355 MB** once the locked requirements are installed — of which
+  204 MB is that one bundled CLI and 259 MB is `__pycache__`. Trimming `__pycache__`, `pip`,
+  `setuptools` and test directories is therefore not optional housekeeping; it is most of the
+  payload. Whether the bundled CLI can be deleted in favour of the user's own installation is an
+  open question for the plan, and worth answering: it is over half the remainder.
+- **There is a version skew in the app today, unrelated to packaging.** The bundled CLI is
+  `2.1.150`; the machine this was measured on has `2.1.261` on `PATH`. So a `cli`-backend session
+  and an `sdk`-backend session run *different Claude Code versions*, silently. This predates the
+  desktop work and should be fixed on its own merits — the plan should surface the resolved path
+  and version per backend rather than leave it invisible.
 
 ---
 
@@ -99,8 +126,13 @@ feature for no gain.
 ### 4.2 Why no bundled Node
 
 Electron's main process *is* Node. Spawning `next start` with `ELECTRON_RUN_AS_NODE=1` in the
-child's environment runs it on Electron's own Node binary. This must be verified early (§9, R3)
-because Next 16's own expectations about its runtime are the risk, not the technique.
+child's environment runs it on Electron's own Node binary.
+
+**Verified (R3, 2026-09-05).** Electron 35.7.5 carries Node 22.16.0, above Next 16's floor of
+20.9.0. Running `node_modules/next/dist/bin/next start` under `ELECTRON_RUN_AS_NODE=1` against a
+production build: *Ready in 188ms*, `/` and `/missions/templates` both 200 with real
+server-rendered HTML, and the route handler `/api/yuri/templates` returned 200 — so server-side
+code, which is the part option B would have deleted, runs correctly. No bundled Node is needed.
 
 ### 4.3 Lifecycle
 
@@ -336,24 +368,39 @@ needs only a per-platform build.
 
 ## 9. Risks, each with the check that settles it
 
-**R1 — Microphone permission on an unsigned app.** macOS TCC keys permission to the binary.
-project-yuri ships `identity: null, hardenedRuntime: false`, so either it hit this or it never
-tested voice across a rebuild. If permission is re-prompted or silently lost on every rebuild,
-development becomes painful and distribution impossible.
-*Check first, before anything else is built:* a throwaway Electron app with
-`NSMicrophoneUsageDescription`, ad-hoc signed, that calls `getUserMedia`. Rebuild it and confirm
-permission survives. If it does not, ad-hoc signing with a stable bundle id is the next thing to
-try, and real signing becomes a prerequisite rather than an option.
+**R1 — Microphone permission on an unsigned app. — LARGELY RESOLVED; one human check left.**
+*Measured 2026-09-05* with a packaged probe (`electron-builder --dir`, `identity: null`,
+`hardenedRuntime: false`, `appId: com.yuri.r1probe`, Electron 35.7.5):
 
-**R2 — Bundled Python and native wheels.** The five native packages must match the target
-architecture. A universal binary needs both, or the app crashes on import with an unhelpful error.
-*Check:* build arm64 first, confirm `import pydantic_core` inside the bundled interpreter on a Mac
-with no Python installed. Intel/universal is a separate, later target.
+- `NSMicrophoneUsageDescription` reaches `Info.plist` via `mac.extendInfo`, and the packaged app
+  reports `getMediaAccessStatus("microphone") == "not-determined"` — so it is correctly identified
+  to TCC rather than broken.
+- **The code signature is stable across rebuilds.** `CDHash` was byte-identical before and after a
+  source change plus a full repackage. The reason: `identity: null` means electron-builder does not
+  sign at all, so the executable keeps stock Electron's own `adhoc,linker-signed` signature, and
+  application code lives in `Resources/app.asar`, which that signature does not cover. TCC keys on
+  what does not change, so **a grant should survive ordinary rebuilds**.
+- **But the signing identity is `Identifier=Electron`, not the app's bundle id**, and the hash is
+  stock Electron's. Two consequences the plan must account for: upgrading Electron changes the
+  hash and therefore **resets the microphone grant**, and the signature provides no identity of its
+  own — any unsigned Electron app built this way presents the same code identity. Neither blocks
+  the project; both are reasons real signing is the eventual answer rather than an optional extra.
 
-**R3 — Next under `ELECTRON_RUN_AS_NODE`.** If Next 16 objects to Electron's Node, the fallback is
-bundling a Node binary, which adds ~50MB and a second runtime to keep patched.
-*Check:* run `next start` under `ELECTRON_RUN_AS_NODE=1` against the existing production build
-before writing any supervision code.
+*Remaining, and it needs a human click by design:* grant the prompt once, rebuild, and confirm the
+grant persists. The probe is retained for this.
+
+**R2 — Bundled Python and native wheels. — RESOLVED, with a caveat.**
+*Measured 2026-09-05:* `cpython-3.14.7+20260901-aarch64-apple-darwin-install_only_stripped`
+(25 MB download, 68 MB unpacked) is relocatable — `sys.prefix` follows wherever it is unpacked.
+`pip install -r requirements.lock` into it succeeded, and under a fully scrubbed environment
+(`env -i`) all twelve top-level imports work, including every native one: `pydantic_core`, `rpds`,
+`charset_normalizer`, `websockets`, `_cffi_backend`.
+*The caveat is size, not correctness:* 355 MB installed, against the 50-80 MB this spec first
+estimated. §2.1 breaks it down. Trimming is a required build step, and the bundled `claude` is the
+single biggest item. Intel/universal remains a separate, later target.
+
+**R3 — Next under `ELECTRON_RUN_AS_NODE`. — RESOLVED.** Verified against Electron 35.7.5 and
+Next 16.2.6; see §4.2 for the measurements. No bundled Node, no fallback needed.
 
 **R4 — Boot time.** Two servers plus an environment probe, where a browser tab was instant.
 *Check:* measure. If the total exceeds roughly three seconds, the boot window's per-check
