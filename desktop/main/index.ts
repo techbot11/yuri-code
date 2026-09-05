@@ -14,7 +14,7 @@ import {
   type ChildState,
 } from "../lib/boot";
 import { mergeEnv, withFallbackPath, type Env } from "../lib/env";
-import { isAppUrl } from "../lib/urls";
+import { externalOpenScheme, isAppUrl } from "../lib/urls";
 import { portsFromEnv } from "../lib/ports";
 import { startServers, stopServers } from "./servers";
 import { homeDir, probeLoginEnv } from "./shellEnv";
@@ -32,6 +32,9 @@ const FRONTEND_URL = `http://localhost:${ports.frontend}`;
 // (a cold Next compile, a loaded machine), not the common case.
 const SPLASH_DELAY_MS = 3000;
 
+// Named so the failure log can say which accelerator was refused.
+const SHOW_ACCELERATOR = "CommandOrControl+Shift+Y";
+
 let mainWindow: BrowserWindow | null = null;
 // Set by before-quit, and read by the window's close handler so a real quit
 // can actually destroy the window. NOTHING else writes it: a call site that
@@ -39,15 +42,36 @@ let mainWindow: BrowserWindow | null = null;
 // skip the drain, orphaning both children holding their ports while the app
 // exits anyway via the default window-all-closed path.
 let quitting = false;
-// Guards the retry cycle end-to-end (stopServers()'s ~3.5s drain, then a
-// fresh boot()) up to the point the window has something to show -- not the
-// backend's own health poll, which now continues in the background after
-// boot() returns (see boot()'s comment). Both stopServers()'s module-level
-// children/died state (servers.ts) and mainWindow are shared, unguarded
-// mutable state -- a second retry click while one cycle is in flight can
-// silently overwrite mainWindow with an orphaned second window, or SIGKILL
-// children the second click only just spawned.
+// Guards EVERY boot cycle end-to-end -- the initial one and each retry
+// (stopServers()'s drain, then a fresh boot()) -- up to the point the window
+// has something to show, but not the backend's own health poll, which
+// continues in the background after boot() returns (see boot()'s comment).
+// Two overlapping cycles would fight over shared, unguarded mutable state:
+// mainWindow, and servers.ts's list of live cycles -- a second retry click
+// while one cycle is in flight can SIGTERM children the first click only
+// just spawned, or leave the window pointed at a boot that has been drained.
+// See runBootCycle(), the only writer.
 let booting = false;
+
+/** Hand a URL to the user's browser -- but only a web URL.
+ *
+ *  isAppUrl() hardened the DECISION to navigate; the ACTION behind it was
+ *  left open, and shell.openExternal() will ask the OS to open a `file:` or
+ *  a custom scheme, which on macOS can launch a local application. See
+ *  externalOpenScheme() for the rule. Prophylactic rather than a live hole
+ *  -- no path in this app renders an attacker-controlled link today -- and
+ *  it belongs beside the origin check it now sits next to.
+ *
+ *  Logs the SCHEME only, never the URL: a URL can carry a token in its
+ *  query, and this log is the wrong place to find that out. */
+function openExternally(url: string): void {
+  const { ok, scheme } = externalOpenScheme(url);
+  if (!ok) {
+    console.error(`[yuri] refusing to open a "${scheme}" URL outside the app`);
+    return;
+  }
+  void shell.openExternal(url);
+}
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -70,13 +94,13 @@ function createWindow(): BrowserWindow {
   // this, a link in a transcript would navigate the app away from Yuri with
   // no way back -- there is no address bar.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    openExternally(url);
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", (event, url) => {
     if (!isAppUrl(url, FRONTEND_URL)) {
       event.preventDefault();
-      void shell.openExternal(url);
+      openExternally(url);
     }
   });
 
@@ -271,16 +295,29 @@ async function boot(): Promise<void> {
   mainWindow.show();
 }
 
-/** The whole retry cycle: drain the old children, then boot from scratch.
- *  `booting` is set for its full duration -- not just boot()'s share of it
- *  -- because a click landing during the ~3.5s stopServers() drain is just
- *  as capable of starting an overlapping cycle as one landing during boot()
- *  itself. */
-async function restart(): Promise<void> {
+/** The ONE way a boot happens -- the first one and every retry alike.
+ *
+ *  `booting` is held for the cycle's full duration, not just boot()'s share
+ *  of it, because a click landing during the ~3.5s stopServers() drain is
+ *  just as capable of starting an overlapping cycle as one landing during
+ *  boot() itself.
+ *
+ *  The INITIAL boot goes through here too, which it did not before. That was
+ *  survivable only by accident: boot:retry was registered after `await
+ *  boot()`, so nothing could ask for a retry until the first boot was over.
+ *  Registering the handlers before the boot (which is where they belong --
+ *  boot:current's replay must exist before the page that asks for it loads)
+ *  removes that accident, and an unguarded initial boot would then be
+ *  exactly the overlapping cycle `booting` exists to prevent.
+ *
+ *  `drainFirst` is the only difference between the two: there is nothing to
+ *  drain before the first boot, and calling stopServers() there would add
+ *  its sleep to every cold start for no reason. */
+async function runBootCycle(drainFirst: boolean): Promise<void> {
   if (booting) return;
   booting = true;
   try {
-    await stopServers();
+    if (drainFirst) await stopServers();
     await boot();
   } finally {
     booting = false;
@@ -303,22 +340,28 @@ app.whenReady().then(async () => {
   // the retry cycle it starts over) decides there is something to show.
   mainWindow = createWindow();
 
-  // An unhandled rejection here is a boot that stops silently -- the one
-  // thing this window exists to prevent -- so it is logged rather than left
-  // to vanish into whatever process.on("unhandledRejection") does by default.
-  // Only ever the message of our own thrown error, never anything reached
-  // via a probe or a spawned child's environment.
-  await boot().catch((err) => {
-    console.error("[yuri] boot() rejected:", err instanceof Error ? err.message : err);
-  });
+  // EVERY handler is registered before the boot, never after it.
+  //
+  // boot:current is the one that makes this load-bearing: it replays the
+  // boot's story to a renderer that mounted after the fact, and boot() ends
+  // by loading the page that asks for it. Registering it afterwards happened
+  // to work -- loadURL() resolves on did-finish-load while React hydrates in
+  // a later task, so the synchronous registration won the race -- but it was
+  // a race won by scheduling luck, not by anything guaranteeing it. A page
+  // whose script runs inline, before load, loses it.
+  //
+  // The other three follow it up here rather than being left behind, so that
+  // "the bridge exists as soon as a renderer can use it" is one rule instead
+  // of a per-channel accident. That makes boot:retry reachable during the
+  // initial boot, which is why runBootCycle() now guards that boot too.
 
-  // Replay for a renderer that subscribed after the fact. Returns null when
-  // nothing has been pushed yet, which the preload treats as "no news".
+  // Returns null when nothing has been pushed yet, which the preload treats
+  // as "no news".
   ipcMain.handle("boot:current", () => lastBoot);
 
   ipcMain.on("boot:retry", () => {
-    void restart().catch((err) => {
-      console.error("[yuri] restart() rejected:", err instanceof Error ? err.message : err);
+    void runBootCycle(true).catch((err) => {
+      console.error("[yuri] retry cycle rejected:", err instanceof Error ? err.message : err);
     });
   });
   // No flag here: before-quit is the only place quitting is set. Setting it
@@ -331,7 +374,23 @@ app.whenReady().then(async () => {
 
   ipcMain.on("tray:state", (_e, state: string) => setTrayState(state));
 
-  globalShortcut.register("CommandOrControl+Shift+Y", () => showMainWindow());
+  // Checked, not assumed: register() returns false when the accelerator is
+  // already taken by another app, and an unlogged false is a shortcut that
+  // silently does nothing forever.
+  if (!globalShortcut.register(SHOW_ACCELERATOR, () => showMainWindow())) {
+    console.error(`[yuri] could not register ${SHOW_ACCELERATOR} — ` +
+      "another app already owns it, so the show-Yuri shortcut is unavailable " +
+      "(the tray icon and the Dock icon still work)");
+  }
+
+  // An unhandled rejection here is a boot that stops silently -- the one
+  // thing this window exists to prevent -- so it is logged rather than left
+  // to vanish into whatever process.on("unhandledRejection") does by default.
+  // Only ever the message of our own thrown error, never anything reached
+  // via a probe or a spawned child's environment.
+  await runBootCycle(false).catch((err) => {
+    console.error("[yuri] boot() rejected:", err instanceof Error ? err.message : err);
+  });
 });
 
 // The ONLY writer of `quitting`, and the ONLY path that stops anything.

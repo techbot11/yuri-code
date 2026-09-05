@@ -15,7 +15,18 @@ contextBridge.exposeInMainWorld("yuriBoot", {
   onState: (cb: (s: unknown) => void) => {
     let live = false;
     ipcRenderer.on("boot:state", (_e, s) => { live = true; cb(s); });
-    ipcRenderer.invoke("boot:current").then((s) => { if (s && !live) cb(s); });
+    // The .catch is not decoration: invoke() rejects if no handler is
+    // registered on the other side, and without it that becomes an
+    // unhandled rejection in the renderer. The live subscription above is
+    // the primary channel, so a failed replay degrades to "no news" -- but
+    // it says so, because a replay that silently never arrives looks exactly
+    // like a boot that never made progress.
+    ipcRenderer.invoke("boot:current")
+      .then((s) => { if (s && !live) cb(s); })
+      .catch((err: unknown) => {
+        console.warn("[yuri] boot:current replay unavailable:",
+                     err instanceof Error ? err.message : err);
+      });
   },
   retry: () => ipcRenderer.send("boot:retry"),
   quit: () => ipcRenderer.send("boot:quit"),
