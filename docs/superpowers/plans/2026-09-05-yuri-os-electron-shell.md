@@ -1069,10 +1069,11 @@ app.whenReady().then(async () => {
   ipcMain.on("boot:retry", () => {
     void stopServers().then(() => boot());
   });
-  ipcMain.on("boot:quit", () => {
-    quitting = true;
-    app.quit();
-  });
+  // app.quit() alone: before-quit is the ONLY writer of `quitting`. Setting
+  // it here made before-quit's re-entry guard skip stopServers(), which left
+  // uvicorn and next start alive holding their ports after a visible button
+  // click. See Task 4's fix round.
+  ipcMain.on("boot:quit", () => app.quit());
 
   globalShortcut.register("CommandOrControl+Shift+Y", () => showMainWindow());
 });
@@ -1109,10 +1110,12 @@ export function showMainWindow(): void {
 // The ONLY path that stops anything. Without the flag, the close handler
 // above would prevent the quit as well and the app could never exit.
 app.on("before-quit", (event) => {
-  if (quitting) return;
+  if (quitting) return;          // already draining
   quitting = true;
   event.preventDefault();
-  void stopServers().then(() => app.exit(0));
+  // finally, not then: a stopServers() that rejects must still exit, or the
+  // app becomes un-quittable.
+  void stopServers().finally(() => app.exit(0));
 });
 
 // macOS: clicking the Dock icon after a hide must bring her back.
@@ -1373,7 +1376,10 @@ function refreshTray(): void {
     { label: trayLabel(currentTrayState), enabled: false },
     { type: "separator" },
     { label: "Show Yuri", click: () => showMainWindow() },
-    { label: "Quit Yuri", click: () => { quitting = true; app.quit(); } },
+    // Just app.quit(). Setting `quitting` here would make before-quit's own
+    // re-entry guard skip the drain and orphan both children holding their
+    // ports -- measured, from the boot page's Quit button doing exactly that.
+    { label: "Quit Yuri", click: () => app.quit() },
   ]));
 }
 
