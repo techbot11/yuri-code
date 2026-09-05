@@ -37,6 +37,7 @@ from cost_log import COST_LOG_PATH, append_cost_event
 from tmux_runner import validate_session_id
 from tools import all_tools, dispatch_tool, tools_for_model
 from yuri import app as yuri_app
+from yuri import setup_store
 from yuri.api.routes import build_router
 from yuri.own.search import SearchUnavailable
 from yuri.providers.base import ProviderUnavailable
@@ -121,9 +122,15 @@ async def lifespan(_: FastAPI):
     if not config.voice_keys_found():
         log.warning(
             "no voice provider key found (%s) — voice sessions WILL fail to start. "
-            "Looked in %s. Fix: run `yapcode config`, or re-run the setup wizard "
-            "(`yapcode up`).",
-            " / ".join(config.VOICE_KEY_VARS), config.env_files_checked())
+            # Names Setup FIRST and the file second. It used to say "run
+            # `yapcode config`", which then edited backend/.env -- the lowest
+            # -precedence source, below the file Setup writes. Both writers now
+            # target setup_store.target_path(), so this can name one path and
+            # both routes to it truthfully.
+            "Looked in %s. Fix: add one under Setup in the app, which writes %s "
+            "-- or edit that file directly with `yapcode config`.",
+            " / ".join(config.VOICE_KEY_VARS), config.env_files_checked(),
+            setup_store.target_path())
     # The debug bus first, so the Yuri events published while the container is
     # being built (project.registered, …) are mirrored by a live writer.
     event_log.start_writer()

@@ -36,6 +36,13 @@ def target_dir() -> str:
     return os.path.join(config.YURI_HOME, "config")
 
 
+def target_path() -> str:
+    """The writable `.env` itself. The one thing callers actually want to name
+    to a user ("saved to ~/Yuri/config/.env"), and what `write()` returns --
+    so GET and PUT can report the same field with the same meaning."""
+    return os.path.join(target_dir(), ".env")
+
+
 def _read(path: str) -> dict[str, str]:
     """Parse an existing `.env` into {key: value}, tolerating the shape a
     human hand-editor (or `yapcode config`) might have left: a `export ` shell
@@ -45,11 +52,22 @@ def _read(path: str) -> dict[str, str]:
     `"export FOO"` rather than `"FOO"` -- a later clear of FOO would then
     merge against a merged-dict that has no `"FOO"` entry to pop, leaving the
     stale `export FOO=old` line right there in the rewritten file. A 200
-    response with the old value still live after a restart is a lie."""
+    response with the old value still live after a restart is a lie.
+
+    O_NOFOLLOW, matching the write side: the read is not passive. Whatever it
+    parses gets MERGED into the file this module then rewrites at 0600, so a
+    symlink planted at `<dir>/.env` would have its target's `IDENT=...` lines
+    copied wholesale into a file the backend loads as environment at every
+    boot. A symlink here is refused (ELOOP / ENOTDIR) and treated as "no
+    existing file" rather than followed."""
     out: dict[str, str] = {}
-    if not os.path.isfile(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        # Missing, a symlink, a directory, unreadable -- all "nothing to
+        # merge". write() then replaces the path outright.
         return out
-    with open(path) as f:
+    with os.fdopen(fd) as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -120,7 +138,17 @@ def write(values: dict[str, str], *, config_dir: str | None = None) -> str:
     config dir to hijack.
     """
     d = config_dir or target_dir()
+    # `mode` on makedirs applies only to directories it CREATES (and is cut by
+    # the umask), so an already-existing 0755 config dir would keep its
+    # permissions -- and while the .env inside it is 0600, a group-writable
+    # directory lets anyone who can write it replace the file wholesale.
+    # chmod unconditionally, and don't fail the save if the directory isn't
+    # ours to tighten.
     os.makedirs(d, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
     path = os.path.join(d, ".env")
     merged = _read(path)
     for k, v in values.items():

@@ -101,10 +101,15 @@ def resolve_project_path(name: str) -> str:
     """
     roots = [os.path.realpath(r) for r in _allowed_roots()]
     if not roots:
+        # Yuri SPEAKS this, so it has to be true as well as short: Setup is
+        # where the setting is changed now (backend/.env is the lowest-
+        # precedence source, below the file Setup writes), and no restart is
+        # needed -- MANAGED_KEYS declares ALLOWED_PROJECT_ROOTS effect="now"
+        # because allowed_project_roots() re-reads os.getenv on every call.
         raise ValueError(
             "No project directories are configured, so I can't start a session. "
-            "Set ALLOWED_PROJECT_ROOTS in backend/.env (e.g. "
-            "ALLOWED_PROJECT_ROOTS=/Users/you/Development) and restart the backend."
+            "Open Setup and set the folders I may work in (for example "
+            "/Users/you/Development) — it takes effect straight away."
         )
     name = (name or "").strip()
 

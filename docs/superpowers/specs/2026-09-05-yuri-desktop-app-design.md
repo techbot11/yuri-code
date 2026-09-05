@@ -296,7 +296,12 @@ Honest, because it is not uniform:
 |---|---|---|
 | Voice keys | **next voice connect** | read live via `os.getenv` at token-mint time |
 | `ANTHROPIC_*` | **next agent session** | passed to the `claude` child at spawn |
-| `YURI_HOME`, `YURI_AGENTS`, `OPENCODE_URL`, `ALLOWED_PROJECT_ROOTS`, ports | **restart required** | frozen into module constants at import (`config.py:131-199`) |
+| `ALLOWED_PROJECT_ROOTS` | **now** | read live by `allowed_project_roots()` at every call, not cached |
+| `YURI_HOME`, `YURI_AGENTS`, `OPENCODE_URL`, ports | **restart required** | frozen into module constants at import (`config.py:131-199`) |
+
+An earlier draft of this table put `ALLOWED_PROJECT_ROOTS` in the restart group. It is not:
+`config.allowed_project_roots()` reads `os.getenv` on every call, so a change applies to the next
+session started. Corrected against the code rather than the other way round.
 
 The settings UI must label the third group as needing a restart and offer to do it — the desktop
 app can restart its own backend cleanly because it owns the child, which the browser version
