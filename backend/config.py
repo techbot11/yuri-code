@@ -15,8 +15,15 @@ Config location:
   * ~/.config/yapcode/.env — used ONLY by a read-only install (Homebrew), whose
                     wrapper sets YAPCODE_CONFIG_DIR because the Cellar can't host
                     a writable backend/.env. A normal clone never consults it.
+  * $YURI_HOME/config/.env — where PUT /yuri/config (setup_store.write) puts
+                    what the Setup UI saves. Consulted UNCONDITIONALLY (unlike
+                    the Homebrew path above, gated on YAPCODE_CONFIG_DIR),
+                    because a plain clone never sets that variable: without
+                    this, a value saved from Setup would sit in a file nothing
+                    ever reads back, invisible again the moment the process
+                    restarts.
 
-VC_AUTH_TOKEN is never auto-loaded from either file — it is opt-in per run mode
+VC_AUTH_TOKEN is never auto-loaded from any of these — it is opt-in per run mode
 (loopback-only `yapcode up`/run.sh stay tokenless; run-network.sh exports it
 explicitly). See the access-control note below.
 """
@@ -26,6 +33,13 @@ import os
 import re
 import secrets
 from dataclasses import dataclass
+
+# Yuri's home: her state store (yuri.db), memory/, journal/ and workspace/.
+# She may read/write freely here; it is appended to the project sandbox roots
+# at runtime (see allowed_project_roots) once it exists. Defined up here
+# (rather than down by YURI_AGENTS, where it used to live) because the
+# .env-loading block below needs it to locate the Setup-writable config dir.
+YURI_HOME: str = os.path.abspath(os.path.expanduser(os.getenv("YURI_HOME") or "~/Yuri"))
 
 # backend/.env lives next to this file — resolved explicitly (not by CWD) so
 # `uvicorn main:app` from any directory behaves the same.
@@ -38,6 +52,12 @@ _CONFIG_DIR = os.path.expanduser(_config_dir_raw) if _config_dir_raw else None
 _CONFIG_ENV = os.path.join(_CONFIG_DIR, ".env") if _CONFIG_DIR else None
 _CONFIG_ENV_DISPLAY = (
     _CONFIG_ENV.replace(os.path.expanduser("~"), "~", 1) if _CONFIG_ENV else None)
+
+# The Setup UI's own writable file (setup_store.write, PUT /yuri/config) for
+# the common case where YAPCODE_CONFIG_DIR is unset -- see the module
+# docstring's Config location section.
+_YURI_HOME_ENV = os.path.join(YURI_HOME, "config", ".env")
+_YURI_HOME_ENV_DISPLAY = _YURI_HOME_ENV.replace(os.path.expanduser("~"), "~", 1)
 
 # Where each .env-provided variable came from, for the startup summary and
 # actionable error messages. Values are display labels, never secrets.
@@ -60,11 +80,15 @@ try:  # dotenv is present in the venv; stay importable without it (e.g. in tests
             ENV_SOURCES[_k] = label
 
     # Precedence: the real process environment wins, then the out-of-tree
-    # config dir, then backend/.env. The real environment is FIRST because
-    # the desktop app injects credentials that way (spec §6.3) -- a leftover
-    # backend/.env would otherwise silently beat them (same failure shape as
-    # a --model flag pinned over the user's own config).
+    # config dir, then the Setup-writable dir beside YURI_HOME, then
+    # backend/.env. The real environment is FIRST because the desktop app
+    # injects credentials that way (spec §6.3) -- a leftover backend/.env
+    # would otherwise silently beat them (same failure shape as a --model
+    # flag pinned over the user's own config). Each later file only fills
+    # what an earlier one left unset, which is what makes this a strict
+    # precedence chain rather than three independent merges.
     _load_env_file(_CONFIG_ENV, override=False, label=_CONFIG_ENV_DISPLAY or "")
+    _load_env_file(_YURI_HOME_ENV, override=False, label=_YURI_HOME_ENV_DISPLAY)
     _load_env_file(_BACKEND_ENV, override=False, label="backend/.env")
 except Exception:
     pass
@@ -163,6 +187,26 @@ MANAGED_KEYS: tuple[ManagedKey, ...] = (
 )
 
 
+def _strip_url_userinfo(value: str) -> str:
+    """`https://user:token@gw/x` -> `https://***@gw/x`. A non-secret setting
+    (a base URL) can still carry a credential in its userinfo -- masking the
+    key but not this would let one straight through GET /yuri/config, which
+    this whole module promises never returns a secret value. Anything that
+    isn't `scheme://...@host` (a bare model name, a plain URL with no
+    userinfo) passes through untouched."""
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return value
+    if not parts.scheme or "@" not in parts.netloc:
+        return value
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, f"***@{host}", parts.path, parts.query, parts.fragment))
+
+
 def masked_hint(value: str, *, secret: bool = True) -> str:
     """A hint that identifies a value without revealing it.
 
@@ -170,12 +214,13 @@ def masked_hint(value: str, *, secret: bool = True) -> str:
     keep hidden -- "…abcd" of a six-character secret reveals most of it. Short
     secrets get no hint at all. Non-secrets (a URL, a model name) are
     configuration rather than credentials, so masking them would make the UI
-    useless."""
+    useless -- except a URL's userinfo, which IS a credential regardless of
+    which field carries it; see `_strip_url_userinfo`."""
     value = (value or "").strip()
     if not value:
         return ""
     if not secret:
-        return value
+        return _strip_url_userinfo(value)
     return f"…{value[-4:]}" if len(value) > 8 else "set"
 
 
@@ -268,10 +313,8 @@ KILL_SESSIONS_ON_SHUTDOWN: bool = _env_bool("VC_KILL_SESSIONS_ON_SHUTDOWN", Fals
 # passes (spec §7).
 YURI_AGENTS: str = (os.getenv("YURI_AGENTS") or "claude-code").strip()
 
-# Yuri's home: her state store (yuri.db), memory/, journal/ and workspace/.
-# She may read/write freely here; it is appended to the project sandbox roots
-# at runtime (see allowed_project_roots) once it exists.
-YURI_HOME: str = os.path.abspath(os.path.expanduser(os.getenv("YURI_HOME") or "~/Yuri"))
+# YURI_HOME itself is defined near the top of this file, not here -- the
+# .env-loading block needs it before this point.
 
 
 # --- OpenCode provider ------------------------------------------------------

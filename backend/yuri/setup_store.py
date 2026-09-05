@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import os
 import re
+import tempfile
+
+import config
 
 _MODE = 0o600
 
@@ -20,15 +23,29 @@ _MODE = 0o600
 def target_dir() -> str:
     """Where the writable `.env` lives. $YAPCODE_CONFIG_DIR when set (the
     Homebrew and desktop layouts both set it), else a config dir beside her
-    data. Created if absent, owner-only."""
+    data. NOT created here -- `write()` does that, since a mere lookup
+    (GET /yuri/config uses this too) has no business creating directories.
+
+    `config.YURI_HOME` rather than re-reading $YURI_HOME: they must be the
+    SAME value, or a test (or a real run) that patches one and not the other
+    would see this function and `config.py`'s own `.env` loader disagree
+    about where the file is."""
     raw = (os.getenv("YAPCODE_CONFIG_DIR") or "").strip()
     if raw:
         return os.path.expanduser(raw)
-    home = os.path.expanduser(os.getenv("YURI_HOME") or "~/Yuri")
-    return os.path.join(home, "config")
+    return os.path.join(config.YURI_HOME, "config")
 
 
 def _read(path: str) -> dict[str, str]:
+    """Parse an existing `.env` into {key: value}, tolerating the shape a
+    human hand-editor (or `yapcode config`) might have left: a `export ` shell
+    prefix, and lines that aren't a valid assignment at all.
+
+    Without the `export` strip, `export FOO=old` parses as the key
+    `"export FOO"` rather than `"FOO"` -- a later clear of FOO would then
+    merge against a merged-dict that has no `"FOO"` entry to pop, leaving the
+    stale `export FOO=old` line right there in the rewritten file. A 200
+    response with the old value still live after a restart is a lie."""
     out: dict[str, str] = {}
     if not os.path.isfile(path):
         return out
@@ -38,7 +55,10 @@ def _read(path: str) -> dict[str, str]:
             if not line or line.startswith("#") or "=" not in line:
                 continue
             k, _, v = line.partition("=")
-            out[k.strip()] = v
+            k = re.sub(r"^export\s+", "", k.strip())
+            if not k.isidentifier():
+                continue
+            out[k] = v
     return out
 
 
@@ -56,10 +76,34 @@ def clean_value(raw: str | None) -> str:
     Used identically by `write()` (the file) and by the route handler that
     mirrors a write into `os.environ` (this process), so the two can never
     disagree about what a given raw value becomes.
+
+    This is the last line of defense for a caller that bypasses HTTP
+    entirely (this module has no framework dependency to raise an HTTP error
+    with). The route handler runs a stricter check of its own first --
+    see `has_forging_newline` -- so a value that reaches here from
+    PUT /yuri/config has already been refused if it needed to be; a value
+    that reaches here from a direct call to `write()` still comes out safe,
+    just silently truncated rather than rejected.
     """
     raw = raw or ""
     first = re.split(r"[\r\n]", raw, maxsplit=1)[0]
     return first.strip()
+
+
+def has_forging_newline(raw: str | None) -> bool:
+    """Whether `raw` contains a newline that is NOT just a single trailing
+    run (`"...\\n"` or `"...\\r\\n"`, the ordinary artifact of pasting a
+    value out of a browser or terminal).
+
+    A value like `"m\\nVC_AUTH_TOKEN=hijacked"` or `"\\nsk-proj-real-key"`
+    would otherwise either forge a second assignment or -- worse -- have
+    `clean_value` collapse it to an empty string, which the empty-clears-the-
+    key rule would then silently delete instead of saving. Route handlers
+    should refuse a value this is true for outright (naming the key, never
+    the value) rather than let `clean_value` decide quietly."""
+    raw = raw or ""
+    body = raw.rstrip("\r\n")
+    return "\n" in body or "\r" in body
 
 
 def write(values: dict[str, str], *, config_dir: str | None = None) -> str:
@@ -69,9 +113,11 @@ def write(values: dict[str, str], *, config_dir: str | None = None) -> str:
     the UI. Values are cleaned with `clean_value()` first; see there for why
     a newline is truncated rather than merely deleted.
 
-    The file is created at mode 0600 and re-chmodded on every write, so a
-    file that predates this code (or was created by a hand edit) is corrected
-    rather than trusted.
+    The replacement file is written to a freshly created temp name (never a
+    fixed one) at mode 0600 from the moment it exists, then renamed over the
+    real path -- so there is no window where the secret sits in a
+    world-readable file, and no fixed name for a symlink planted in the
+    config dir to hijack.
     """
     d = config_dir or target_dir()
     os.makedirs(d, mode=0o700, exist_ok=True)
@@ -84,14 +130,28 @@ def write(values: dict[str, str], *, config_dir: str | None = None) -> str:
         else:
             merged.pop(k, None)
 
-    tmp = path + ".tmp"
-    # Create with 0600 from the start: writing then chmodding leaves a window
-    # where the file is world-readable.
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _MODE)
-    with os.fdopen(fd, "w") as f:
-        f.write("# Written by Yuri OS Setup. Values are one per line.\n")
-        for k in sorted(merged):
-            f.write(f"{k}={merged[k]}\n")
-    os.replace(tmp, path)
+    # mkstemp creates the file itself (O_CREAT|O_EXCL, mode 0600 baked into
+    # the open call) rather than opening a name that might already exist --
+    # a fixed name like "<path>.tmp" would let a leftover file's permissions
+    # (mode applies only on CREATION, not on an existing file) or a symlink
+    # planted at that name survive into this write. fchmod is redundant
+    # given mkstemp's own mode, but makes the guarantee explicit rather than
+    # implicit in a stdlib default.
+    fd, tmp = tempfile.mkstemp(prefix=".env.", suffix=".tmp", dir=d)
+    try:
+        os.fchmod(fd, _MODE)
+        with os.fdopen(fd, "w") as f:
+            f.write("# Written by Yuri OS Setup. Values are one per line.\n")
+            for k in sorted(merged):
+                f.write(f"{k}={merged[k]}\n")
+        os.replace(tmp, path)
+    except BaseException:
+        # The write (or the rename) failed -- don't leave a stray 0600 file
+        # holding a secret sitting around under a name nobody will clean up.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     os.chmod(path, _MODE)
     return path

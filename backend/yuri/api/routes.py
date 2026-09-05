@@ -377,6 +377,20 @@ def build_router(require_auth: Callable) -> APIRouter:
             raise HTTPException(
                 status_code=400,
                 detail=f"not settings Yuri manages: {', '.join(unknown)}")
+        # A value with a newline anywhere but a single trailing run (the
+        # ordinary paste artifact) is refused outright, naming only the KEY.
+        # Letting it through would hand it to clean_value(), which either
+        # forges a second assignment or -- for a value that only becomes
+        # empty because of a LEADING newline -- silently deletes the key
+        # while this endpoint reports success. Never the value: that would
+        # put the secret it's protecting straight into the 400 body.
+        bad = sorted(name for name, raw in body.values.items()
+                     if (raw or "").strip()
+                     and setup_store.has_forging_newline(raw))
+        if bad:
+            raise HTTPException(
+                status_code=400,
+                detail=f"value contains a newline: {', '.join(bad)}")
         path = await asyncio.to_thread(setup_store.write, dict(body.values))
         # Also update THIS process's environment. Both voice_keys_found() and
         # allowed_project_roots() read os.getenv live, so a file write alone

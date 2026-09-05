@@ -39,6 +39,19 @@ class Masking(unittest.TestCase):
         self.assertEqual(config.masked_hint("claude-opus-5", secret=False),
                          "claude-opus-5")
 
+    def test_a_non_secret_url_still_hides_its_own_userinfo(self):
+        # ANTHROPIC_BASE_URL is not secret, but a URL can carry a credential
+        # in its own userinfo -- that part must never reach GET /yuri/config
+        # regardless of which field it rode in on.
+        self.assertEqual(
+            config.masked_hint("https://user:token@gw/x", secret=False),
+            "https://***@gw/x")
+
+    def test_a_non_secret_url_without_userinfo_is_untouched(self):
+        self.assertEqual(
+            config.masked_hint("https://gw.example.com/x", secret=False),
+            "https://gw.example.com/x")
+
 
 class Registry(unittest.TestCase):
     def test_every_key_the_spec_names_is_managed(self):

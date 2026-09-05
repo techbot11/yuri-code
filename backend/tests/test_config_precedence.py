@@ -39,10 +39,13 @@ class _Harness(unittest.TestCase):
             f.write(f"{PROBE}={value}\n")
         return path
 
-    def load_in_config_order(self, config_env: str | None, backend_env: str | None) -> None:
+    def load_in_config_order(self, config_env: str | None, backend_env: str | None,
+                             yuri_home_env: str | None = None) -> None:
         """The exact sequence config.py performs, in the same order."""
         if config_env:
             config._load_env_file(config_env, override=False, label="config dir")
+        if yuri_home_env:
+            config._load_env_file(yuri_home_env, override=False, label="yuri home dir")
         if backend_env:
             config._load_env_file(backend_env, override=False, label="backend/.env")
 
@@ -70,11 +73,26 @@ class Precedence(_Harness):
                                   self.plant("backend.env", "from-backend-env"))
         self.assertEqual(config.ENV_SOURCES.get(PROBE), "config dir")
 
+    def test_the_yuri_home_config_dir_beats_backend_env(self):
+        # This is the file PUT /yuri/config (setup_store.write) actually
+        # writes in a plain clone -- it must not be shadowed by backend/.env.
+        self.load_in_config_order(
+            None, self.plant("backend.env", "from-backend-env"),
+            yuri_home_env=self.plant("home.env", "from-yuri-home-dir"))
+        self.assertEqual(os.environ[PROBE], "from-yuri-home-dir")
+
+    def test_the_out_of_tree_config_dir_beats_the_yuri_home_config_dir(self):
+        self.load_in_config_order(
+            self.plant("cfg.env", "from-config-dir"),
+            self.plant("backend.env", "from-backend-env"),
+            yuri_home_env=self.plant("home.env", "from-yuri-home-dir"))
+        self.assertEqual(os.environ[PROBE], "from-config-dir")
+
 
 class CallSites(_Harness):
     """The loader having the right semantics is not enough — config.py's own
-    two calls must use them. This pins the observable outcome at import order,
-    which is what a future reordering would break."""
+    three calls must use them. This pins the observable outcome at import
+    order, which is what a future reordering would break."""
 
     def test_neither_call_site_overrides(self):
         import inspect
@@ -83,7 +101,13 @@ class CallSites(_Harness):
         self.assertNotIn("override=True", head,
                          "a .env file must never override the real environment")
         self.assertEqual(head.count("_load_env_file(_CONFIG_ENV, override=False"), 1)
+        self.assertEqual(head.count("_load_env_file(_YURI_HOME_ENV, override=False"), 1)
         self.assertEqual(head.count("_load_env_file(_BACKEND_ENV, override=False"), 1)
-        # And the config dir is consulted FIRST, so it wins over backend/.env.
-        self.assertLess(head.index("_load_env_file(_CONFIG_ENV"),
-                        head.index("_load_env_file(_BACKEND_ENV"))
+        # And each is consulted in strict precedence order: the out-of-tree
+        # (Homebrew) config dir first, then the dir PUT /yuri/config actually
+        # writes in a plain clone, then backend/.env last.
+        i_config_dir = head.index("_load_env_file(_CONFIG_ENV")
+        i_yuri_home = head.index("_load_env_file(_YURI_HOME_ENV")
+        i_backend = head.index("_load_env_file(_BACKEND_ENV")
+        self.assertLess(i_config_dir, i_yuri_home)
+        self.assertLess(i_yuri_home, i_backend)

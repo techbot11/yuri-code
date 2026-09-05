@@ -98,7 +98,8 @@ class ConfigWrite(_Harness):
         self.assertIn("HOME", r.json()["detail"])
 
     def test_a_write_lands_and_reports_its_effect_scope(self):
-        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name):
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
             r = self.client.put("/yuri/config",
                                 json={"values": {"ANTHROPIC_MODEL": "claude-opus-5"}})
         self.assertEqual(r.status_code, 200, r.text)
@@ -109,7 +110,8 @@ class ConfigWrite(_Harness):
             self.assertIn("ANTHROPIC_MODEL=claude-opus-5", f.read())
 
     def test_the_written_file_is_not_world_readable(self):
-        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name):
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
             self.client.put("/yuri/config", json={"values": {"GEMINI_API_KEY": SECRET}})
         mode = os.stat(os.path.join(self.tmp.name, ".env")).st_mode & 0o777
         self.assertEqual(mode, 0o600, f"credentials file is mode {oct(mode)}")
@@ -135,26 +137,115 @@ class ConfigWrite(_Harness):
             self.assertIsNone(os.environ.get("ANTHROPIC_MODEL"))
 
     def test_the_response_does_not_echo_what_was_written(self):
-        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name):
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
             r = self.client.put("/yuri/config", json={"values": {"GEMINI_API_KEY": SECRET}})
         self.assertNotIn(SECRET, r.text)
 
     def test_an_empty_value_clears_the_key(self):
         # The only way to unset a wrong key from the UI.
-        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name):
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
             self.client.put("/yuri/config", json={"values": {"ANTHROPIC_MODEL": "x"}})
             self.client.put("/yuri/config", json={"values": {"ANTHROPIC_MODEL": ""}})
         with open(os.path.join(self.tmp.name, ".env")) as f:
             self.assertNotIn("ANTHROPIC_MODEL", f.read())
 
     def test_a_write_leaves_other_keys_alone(self):
-        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name):
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
             self.client.put("/yuri/config", json={"values": {"ANTHROPIC_MODEL": "m1"}})
             self.client.put("/yuri/config", json={"values": {"ANTHROPIC_BASE_URL": "u1"}})
         with open(os.path.join(self.tmp.name, ".env")) as f:
             text = f.read()
         self.assertIn("ANTHROPIC_MODEL=m1", text)
         self.assertIn("ANTHROPIC_BASE_URL=u1", text)
+
+    def test_a_newline_in_the_middle_of_a_value_is_refused(self):
+        # Letting this through would either forge a second assignment (were
+        # clean_value's truncation not there) or bury the attacker's payload
+        # inside the legitimate value -- refusing it outright is simpler and
+        # doesn't depend on clean_value's exact truncation point.
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            r = self.client.put(
+                "/yuri/config",
+                json={"values": {"ANTHROPIC_MODEL": "m\nVC_AUTH_TOKEN=hijacked"}})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("ANTHROPIC_MODEL", r.json()["detail"])
+        self.assertNotIn("hijacked", r.text)
+        self.assertFalse(os.path.isfile(os.path.join(self.tmp.name, ".env")))
+
+    def test_a_value_that_only_becomes_empty_via_a_leading_newline_is_refused(self):
+        # clean_value("\n" + SECRET) is "" (everything before the first
+        # newline), and empty-clears-the-key would then silently DELETE
+        # the key while this endpoint reports success -- the secret the
+        # caller meant to save never lands anywhere, and nothing says so.
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            r = self.client.put("/yuri/config",
+                                json={"values": {"GEMINI_API_KEY": "\n" + SECRET}})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("GEMINI_API_KEY", r.json()["detail"])
+        self.assertNotIn(SECRET, r.text)
+        self.assertFalse(os.path.isfile(os.path.join(self.tmp.name, ".env")))
+
+    def test_a_single_trailing_newline_is_the_common_paste_case_and_still_saves(self):
+        # The ordinary artifact of pasting a value out of a browser or
+        # terminal -- must not be refused the way an embedded newline is.
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            r = self.client.put("/yuri/config",
+                                json={"values": {"GEMINI_API_KEY": SECRET + "\n"}})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(os.environ.get("GEMINI_API_KEY"), SECRET)
+
+    def test_a_lowercase_name_is_refused(self):
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name):
+            r = self.client.put("/yuri/config", json={"values": {"anthropic_model": "x"}})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("anthropic_model", r.json()["detail"])
+        self.assertFalse(os.path.isfile(os.path.join(self.tmp.name, ".env")))
+
+    def test_a_name_with_surrounding_whitespace_is_refused(self):
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name):
+            r = self.client.put("/yuri/config", json={"values": {" ANTHROPIC_MODEL ": "x"}})
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(os.path.isfile(os.path.join(self.tmp.name, ".env")))
+
+    def test_vc_auth_token_is_refused(self):
+        # The name the whole "refuse an unknown key" guard exists to stop.
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name):
+            r = self.client.put("/yuri/config", json={"values": {"VC_AUTH_TOKEN": "x"}})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("VC_AUTH_TOKEN", r.json()["detail"])
+        self.assertFalse(os.path.isfile(os.path.join(self.tmp.name, ".env")))
+
+    def test_a_mixed_known_and_unknown_body_writes_nothing(self):
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name):
+            r = self.client.put(
+                "/yuri/config",
+                json={"values": {"ANTHROPIC_MODEL": "m1", "HOME": "/tmp/pwned"}})
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(os.path.isfile(os.path.join(self.tmp.name, ".env")))
+
+    def test_clearing_a_hand_written_export_line_actually_clears_it(self):
+        # `_read` used to mis-key `export FOO=old` as the key "export FOO",
+        # so a clear of FOO never found it to remove -- the stale line, and
+        # the old value, survived the "successful" clear.
+        from dotenv import dotenv_values
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            env_path = os.path.join(self.tmp.name, ".env")
+            os.makedirs(self.tmp.name, exist_ok=True)
+            with open(env_path, "w") as f:
+                f.write("export OPENAI_API_KEY=old-leaked-key\n")
+            r = self.client.put("/yuri/config", json={"values": {"OPENAI_API_KEY": ""}})
+        self.assertEqual(r.status_code, 200, r.text)
+        resolved = dotenv_values(env_path)
+        self.assertFalse(resolved.get("OPENAI_API_KEY"))
+        with open(env_path) as f:
+            self.assertNotIn("old-leaked-key", f.read())
 
 
 class StoreDirectly(unittest.TestCase):
@@ -176,3 +267,50 @@ class StoreDirectly(unittest.TestCase):
             with open(os.path.join(d, ".env")) as f:
                 text = f.read()
             self.assertNotIn("VC_AUTH_TOKEN", text)
+            # And the legitimate part of the value actually survived --
+            # this must be a truncation, not the whole write disappearing.
+            self.assertIn("ANTHROPIC_MODEL=m", text)
+
+    def test_a_stale_world_readable_tmp_file_is_never_written_through(self):
+        # A fixed temp filename would let a leftover file's permissions
+        # (os.open's mode argument applies only when CREATING a file) survive
+        # into the write: the secret would sit in a 0644 file for the
+        # duration of the write, before the final chmod fixed it up.
+        with tempfile.TemporaryDirectory() as d:
+            stale = os.path.join(d, ".env.tmp")
+            with open(stale, "w") as f:
+                f.write("leftover junk from a previous run")
+            os.chmod(stale, 0o644)
+
+            path = setup_store.write({"GEMINI_API_KEY": SECRET}, config_dir=d)
+
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            with open(path) as f:
+                self.assertIn(SECRET, f.read())
+            # The stale file was never touched -- the secret was never
+            # written through a world-readable name.
+            self.assertEqual(os.stat(stale).st_mode & 0o777, 0o644)
+            with open(stale) as f:
+                self.assertNotIn(SECRET, f.read())
+
+    def test_a_tmp_filename_that_is_a_symlink_is_never_followed(self):
+        # A fixed temp filename also means a symlink planted at that name
+        # (by anything else with write access to the config dir) would have
+        # the secret written through it to wherever it points.
+        with tempfile.TemporaryDirectory() as d, \
+             tempfile.TemporaryDirectory() as outside:
+            escape_target = os.path.join(outside, "escaped")
+            with open(escape_target, "w"):
+                pass
+            os.chmod(escape_target, 0o600)
+            os.symlink(escape_target, os.path.join(d, ".env.tmp"))
+
+            path = setup_store.write({"GEMINI_API_KEY": SECRET}, config_dir=d)
+
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            with open(path) as f:
+                self.assertIn(SECRET, f.read())
+            # The symlink was never followed -- nothing was written to its
+            # target outside the config dir.
+            with open(escape_target) as f:
+                self.assertNotIn(SECRET, f.read())
