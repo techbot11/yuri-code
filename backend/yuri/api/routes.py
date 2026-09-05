@@ -23,7 +23,7 @@ from yuri.app import container, last_spoke_at, narration_mode, set_narration_mod
 from yuri.domain.memory import InvalidMemory, Memory
 from yuri.domain.mission import InvalidTransition
 from yuri.domain.specialist import ROLE_PREFERENCE, ROLES, TASK_CAPABILITIES
-from yuri.domain.task import InvalidTaskTransition
+from yuri.domain.task import TASK_KINDS, InvalidTaskTransition
 from yuri.domain.workflow import InvalidWorkflowTransition
 from yuri.mcp import config as mcp_config
 from yuri.mcp.manager import FAILED_VERDICT, probe
@@ -359,7 +359,14 @@ def build_router(require_auth: Callable) -> APIRouter:
              # Whether there is a default to go back to, which is what decides
              # if the panel offers Reset at all.
              "has_default": t.name in builtin,
+             # The closed vocabularies a task's fields may draw from. Sent
+             # rather than hardcoded in the editor: the form turns each one
+             # into a set of choices, and a list that drifts from the
+             # validator's is a control offering something the save rejects.
              "verify_names": sorted(VERIFY_NAMES),
+             "roles": list(ROLES),
+             "kinds": list(TASK_KINDS),
+             "capabilities": list(TASK_CAPABILITIES),
              "max_tasks": MAX_TASKS_PER_WORKFLOW,
              "tasks": [{"id": task.id, "title": task.title, "role": task.role,
                         "instruction": task.instruction,
