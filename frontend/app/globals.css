@@ -2806,14 +2806,6 @@ details.handoff:hover>summary {
       overflow: visible;
    }
 
-   /* .shell is height: auto here, so the page itself does the scrolling —
-      a 100vh cap on the gate would clip the form instead. */
-   .setup-gate {
-      max-height: none;
-      overflow-y: visible;
-      padding: 14px;
-   }
-
    .orb-canvas,
    .naming,
    .hint,
@@ -4625,6 +4617,21 @@ a.miss-row {
 
 .setup-gate>.setup-view {
    max-width: 680px;
+}
+
+/* The mobile override lives HERE, after the base rule, not up in the main
+   @media block at the top of this section: a media query adds no specificity,
+   so an override written earlier in the file loses to an identical selector
+   written later. Up there it was dead, and the gate kept its 100vh inner
+   scroller inside a page that also scrolls — the exact clipping this avoids.
+   Base-first is the file's convention (see .stage). */
+@media (max-width: 900px) {
+   /* .shell is height: auto here, so the page itself does the scrolling. */
+   .setup-gate {
+      max-height: none;
+      overflow-y: visible;
+      padding: 14px;
+   }
 }
 
 .setup-checks {
