@@ -19,7 +19,9 @@ density and per-point brightness both encode state without needing colour.
 
     asleep     a sparse, dim cloud -- present but not listening
     listening  the full cloud at a resting brightness
-    speaking   the full cloud, brighter
+    thinking   the full cloud, a touch brighter with a faint core --
+               composing a reply, between listening and speaking
+    speaking   the full cloud, brighter still
     working    brighter still, with a denser core
     needs-you  the full cloud plus a solid centre, which is the one state
                that has to read instantly at 16pt
@@ -123,6 +125,9 @@ def write_png(path, rows):
 STATES = {
     "asleep":    (80,  0.55, 0.00, False),
     "listening": (190, 0.80, 0.06, False),
+    # Same point count as listening -- brighter, with a faint core -- so she
+    # reads as composing a reply, not as idle and not yet as speaking.
+    "thinking":  (190, 0.86, 0.14, False),
     "speaking":  (190, 0.95, 0.26, False),
     "working":   (240, 1.00, 0.46, False),
     "needs-you": (240, 1.00, 0.46, True),

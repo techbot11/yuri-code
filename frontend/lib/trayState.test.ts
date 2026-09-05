@@ -14,8 +14,18 @@ test("the priority order matches desktop/lib/tray.ts", () => {
   assert.equal(trayStateFor(f({ missionsRunning: 1, connected: true,
                                 vstate: "speaking" })), "working");
   assert.equal(trayStateFor(f({ connected: true, vstate: "speaking" })), "speaking");
+  assert.equal(trayStateFor(f({ connected: true, vstate: "thinking" })), "thinking");
   assert.equal(trayStateFor(f({ connected: true })), "listening");
   assert.equal(trayStateFor(f()), "asleep");
+});
+
+test("thinking outranks listening but not speaking", () => {
+  assert.equal(trayStateFor(f({ connected: true, vstate: "thinking" })), "thinking");
+  assert.equal(trayStateFor(f({ connected: true, vstate: "speaking" })), "speaking");
+});
+
+test("hearing genuinely is listening", () => {
+  assert.equal(trayStateFor(f({ connected: true, vstate: "hearing" })), "listening");
 });
 
 test("a pending approval reports even when voice is off", () => {

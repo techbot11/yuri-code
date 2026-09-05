@@ -6,7 +6,8 @@
 // sides pin the same priority order, so a change to one that is not made to
 // the other fails a test rather than drifting silently.
 
-export type TrayState = "asleep" | "listening" | "speaking" | "working" | "needs-you";
+export type TrayState =
+  "asleep" | "listening" | "thinking" | "speaking" | "working" | "needs-you";
 
 export function trayStateFor(f: {
   connected: boolean; vstate: string;
@@ -15,6 +16,12 @@ export function trayStateFor(f: {
   if (f.approvalsPending > 0) return "needs-you";
   if (f.missionsRunning > 0) return "working";
   if (f.vstate === "speaking") return "speaking";
+  // "thinking" ranks above "listening": composing a reply or running a tool
+  // call is not the same as taking input, and claiming "listening" during a
+  // long agent-driving stretch is exactly the lie this state exists to fix.
+  // "hearing" is not listed here on purpose -- it IS listening, just with
+  // voice activity detected, so it falls through to the connected check below.
+  if (f.vstate === "thinking") return "thinking";
   if (f.connected) return "listening";
   return "asleep";
 }

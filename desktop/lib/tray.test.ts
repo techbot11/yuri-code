@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { TRAY_STATES, trayLabel, trayState, type TrayFacts, type TrayState } from "./tray.ts";
 
 const facts = (over: Partial<TrayFacts> = {}): TrayFacts => ({
-  voiceConnected: false, speaking: false, missionsRunning: 0, approvalsPending: 0, ...over,
+  voiceConnected: false, speaking: false, thinking: false,
+  missionsRunning: 0, approvalsPending: 0, ...over,
 });
 
 test("not connected is asleep, and says so honestly", () => {
@@ -18,6 +19,15 @@ test("connected and quiet is listening", () => {
 
 test("speaking outranks listening", () => {
   assert.equal(trayState(facts({ voiceConnected: true, speaking: true })), "speaking");
+});
+
+test("thinking outranks listening", () => {
+  assert.equal(trayState(facts({ voiceConnected: true, thinking: true })), "thinking");
+});
+
+test("speaking outranks thinking", () => {
+  assert.equal(trayState(facts({ voiceConnected: true, thinking: true, speaking: true })),
+               "speaking");
 });
 
 test("a running mission shows as working even while she talks", () => {
@@ -41,11 +51,19 @@ test("needs-you is reported even while she is asleep", () => {
 });
 
 test("every state has a label a person would understand", () => {
-  for (const s of ["asleep", "listening", "speaking", "working", "needs-you"] as const) {
+  for (const s of
+    ["asleep", "listening", "thinking", "speaking", "working", "needs-you"] as const) {
     const label = trayLabel(s);
     assert.ok(label.length > 4, s);
     assert.doesNotMatch(label, /-/, `${s}: the label must not be the slug`);
   }
+});
+
+test("thinking's label reads distinct from working's", () => {
+  // "Working on something" means missions are running -- a different fact.
+  // "Thinking" must not be confusable with it.
+  assert.notEqual(trayLabel("thinking"), trayLabel("working"));
+  assert.doesNotMatch(trayLabel("thinking"), /working on something/i);
 });
 
 test("TRAY_STATES covers every state trayState can return", () => {
@@ -54,6 +72,7 @@ test("TRAY_STATES covers every state trayState can return", () => {
   const reachable = new Set<TrayState>([
     trayState(facts()),
     trayState(facts({ voiceConnected: true })),
+    trayState(facts({ voiceConnected: true, thinking: true })),
     trayState(facts({ voiceConnected: true, speaking: true })),
     trayState(facts({ missionsRunning: 1 })),
     trayState(facts({ approvalsPending: 1 })),
