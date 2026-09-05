@@ -7,22 +7,18 @@
 // specialist is "agent", so shipping "Agents" beside "Specialists" would put
 // two rail items with the same name on different things.
 import { useCallback, useEffect, useState } from "react";
-import { ApiError, ydelete, yget, ypost, yput } from "@/lib/api";
-import {
-  EMPTY_SPECIALIST, formFrom, specialistBody,
-  type Specialist, type SpecialistForm as Form,
-} from "@/lib/roster";
+import { useRouter } from "next/navigation";
+import { ApiError, ydelete, yget, ypost } from "@/lib/api";
+import { type Specialist } from "@/lib/roster";
 import { SpecialistCard } from "./SpecialistCard";
-import { SpecialistForm } from "./SpecialistForm";
 import { ViewError } from "./ViewError";
 
 export function Roster() {
   const [rows, setRows] = useState<Specialist[] | null>(null);
   const [loadError, setLoadError] = useState<unknown>(null);
-  const [form, setForm] = useState<Form | null>(null);
-  const [editingId, setEditingId] = useState<string>("");
   const [busy, setBusy] = useState("");
   const [saveError, setSaveError] = useState("");
+  const router = useRouter();
 
   const load = useCallback(async () => {
     try {
@@ -40,23 +36,6 @@ export function Roster() {
   useEffect(() => {
     void load();
   }, [load]);
-
-  const save = async () => {
-    if (!form) return;
-    setBusy("save");
-    setSaveError("");
-    try {
-      if (editingId) await yput(`specialists/${editingId}`, specialistBody(form));
-      else await ypost("specialists", specialistBody(form));
-      setForm(null);
-      setEditingId("");
-      await load();
-    } catch (e) {
-      setSaveError(e instanceof ApiError ? e.message : String(e));
-    } finally {
-      setBusy("");
-    }
-  };
 
   const archive = async (s: Specialist) => {
     setBusy(s.id);
@@ -87,18 +66,12 @@ export function Roster() {
     }
   };
 
-  // Only names OTHER than the one being edited, or renaming nothing would
-  // collide with itself.
-  const otherNames = (rows || [])
-    .filter((s) => s.id !== editingId)
-    .map((s) => s.name);
-
   return (
     <section className="roster">
       <div className="mcp-head">
         <h3 className="sectitle">Your agents</h3>
-        {!form && rows && (
-          <button className="txtoggle" onClick={() => { setForm(EMPTY_SPECIALIST); setEditingId(""); }}>
+        {rows && (
+          <button className="txtoggle" onClick={() => router.push("/agents/new")}>
             Add an agent
           </button>
         )}
@@ -109,20 +82,8 @@ export function Roster() {
         nobody read is not something to hand tools to.
       </p>
 
-      {form && (
-        <SpecialistForm
-          form={form}
-          setForm={setForm}
-          existingNames={otherNames}
-          editing={Boolean(editingId)}
-          busy={busy === "save"}
-          error={saveError}
-          onSave={() => void save()}
-          onCancel={() => { setForm(null); setEditingId(""); setSaveError(""); }}
-        />
-      )}
 
-      {!form && saveError && <pre className="mcp-err">{saveError}</pre>}
+      {saveError && <pre className="mcp-err">{saveError}</pre>}
 
       {loadError ? (
         <ViewError error={loadError} onRetry={() => void load()} />
@@ -137,7 +98,10 @@ export function Roster() {
               key={s.id}
               s={s}
               busy={busy === s.id}
-              onEdit={() => { setForm(formFrom(s)); setEditingId(s.id); setSaveError(""); }}
+              // A ROUTE, not a form that unfolds at the top: clicking Edit
+              // on a row scrolled far down used to open the form off-screen
+              // above, so the click looked like it had done nothing.
+              onEdit={() => router.push(`/agents/${s.id}`)}
               onArchive={() => void archive(s)}
               onReset={() => void reset(s)}
             />

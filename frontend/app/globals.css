@@ -3318,6 +3318,9 @@ a.miss-row {
    gap: 4px;
 }
 
+/* The back link on any detail route that sits inside the panel. Named for
+   the panel rather than for missions, because agents/[id] uses it too. */
+.panel-back,
 .miss-back {
    align-self: flex-start;
    font-size: 12.5px;
@@ -3326,6 +3329,7 @@ a.miss-row {
    margin-bottom: 10px;
 }
 
+.panel-back:hover,
 .miss-back:hover {
    color: var(--ink);
 }
