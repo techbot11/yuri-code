@@ -76,6 +76,9 @@ export type ManagedKey = {
   /** Identifies the value without revealing it ("…4f2a"), or the value itself
    *  for a non-secret. Empty when unset. */
   hint: string;
+  /** Whether `hint` HIDES something rather than being the value. True for
+   *  every secret, and for a non-secret URL whose userinfo was stripped. */
+  masked: boolean;
   source: string;
 };
 
@@ -163,4 +166,25 @@ export function shellShadowWarning(key: ManagedKey): string {
   return `${key.name} is set in the shell Yuri was started from. Saving here `
     + `changes it straight away, but that exported value wins again the next `
     + `time Yuri starts — unset it in your shell to make this stick.`;
+}
+
+
+/** What a field should show when the screen opens.
+ *
+ *  A value the user saved must be visible when they come back, or the screen
+ *  reads as though the save was lost. But only where the hint IS the value:
+ *  pre-filling a masked one would save the mask ("…9f31", or a URL's
+ *  "***" in place of its userinfo) as the value on the next save.
+ *
+ *  A draft entry always wins -- it is what the user has typed. */
+export function fieldValue(k: ManagedKey, draft: Record<string, string>): string {
+  if (Object.prototype.hasOwnProperty.call(draft, k.name)) return draft[k.name];
+  return k.set && !k.masked ? k.hint : "";
+}
+
+/** What an empty field means, in plain words. A secret that IS set must not
+ *  look identical to one that was never set. */
+export function fieldPlaceholder(k: ManagedKey): string {
+  if (!k.set) return "not set";
+  return k.masked ? `${k.hint} — leave blank to keep it` : "";
 }

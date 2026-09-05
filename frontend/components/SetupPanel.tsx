@@ -10,8 +10,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, yget, yput } from "@/lib/api";
 import {
-  blocking, canSave, effectsSentence, fixAction, pendingChanges,
-  shellShadowWarning,
+  blocking, canSave, effectsSentence, fieldPlaceholder, fieldValue, fixAction,
+  pendingChanges, shellShadowWarning,
   type DoctorCheck, type Effect, type ManagedKey,
 } from "@/lib/setup";
 import { ViewError } from "./ViewError";
@@ -176,8 +176,9 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
       </div>
       <p className="mcp-blurb">
         Saved to <code>{where}</code>, readable only by you — the same file{" "}
-        <code>yapcode config</code> edits. Yuri never sends a saved value back to this
-        screen, so a key field starts empty — leave it that way to keep the current one.
+        <code>yapcode config</code> edits. What you saved is shown here, except for
+        secrets: a key never comes back to this screen, so its field starts empty and
+        leaving it that way keeps the current one.
       </p>
 
       <div className="setup-keys">
@@ -197,8 +198,8 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
               type={k.secret ? "password" : "text"}
               autoComplete="off"
               spellCheck={false}
-              placeholder={k.set ? (k.secret ? "unchanged" : k.hint) : "not set"}
-              value={draft[k.name] ?? ""}
+              placeholder={fieldPlaceholder(k)}
+              value={fieldValue(k, draft)}
               onChange={(e) => {
                 setDraft({ ...draft, [k.name]: e.target.value });
                 setSaved("");

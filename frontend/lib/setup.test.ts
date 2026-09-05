@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  blocking, canSave, effectLabel, effectsSentence, fixAction, gateOpen,
-  pendingChanges, shadowedByShell, shellShadowWarning, SHELL_SOURCE,
-  type DoctorCheck, type ManagedKey,
+  blocking, canSave, effectLabel, effectsSentence, fieldPlaceholder, fieldValue,
+  fixAction, gateOpen, pendingChanges, shadowedByShell, shellShadowWarning,
+  SHELL_SOURCE, type DoctorCheck, type ManagedKey,
 } from "./setup.ts";
 
 const check = (over: Partial<DoctorCheck> = {}): DoctorCheck => ({
@@ -12,8 +12,8 @@ const check = (over: Partial<DoctorCheck> = {}): DoctorCheck => ({
 
 const key = (over: Partial<ManagedKey> = {}): ManagedKey => ({
   name: "GEMINI_API_KEY", label: "Gemini API key", secret: true, effect: "now",
-  blurb: "Lets her talk over Gemini Live.", set: false, hint: "", source: "not set",
-  ...over,
+  blurb: "Lets her talk over Gemini Live.", set: false, hint: "", masked: false,
+  source: "not set", ...over,
 });
 
 test("only a FAILING REQUIRED check blocks", () => {
@@ -187,4 +187,51 @@ test("an UNSET key is never flagged, whatever its source says", () => {
   // shadow — a warning here would land on every empty field.
   assert.equal(shadowedByShell(key({ set: false, source: SHELL_SOURCE })), false);
   assert.equal(shellShadowWarning(key({ set: false, source: SHELL_SOURCE })), "");
+});
+
+// --- what a field shows when you come back --------------------------------
+
+test("a saved NON-secret is pre-filled, so it does not look lost", () => {
+  // The complaint this exists for: a value shown only as a greyed placeholder
+  // reads as an empty field, as though the save never happened.
+  const k = key({ name: "ANTHROPIC_MODEL", secret: false, set: true,
+                  hint: "claude-opus-5", masked: false });
+  assert.equal(fieldValue(k, {}), "claude-opus-5");
+  assert.equal(fieldPlaceholder(k), "");
+});
+
+test("a MASKED value is never pre-filled, or the mask gets saved as the value", () => {
+  // A secret's hint is "…9f31"; a non-secret URL's userinfo becomes "***".
+  // Either one, pre-filled, would be written verbatim on the next save.
+  const secret = key({ name: "GEMINI_API_KEY", secret: true, set: true,
+                       hint: "…9f31", masked: true });
+  assert.equal(fieldValue(secret, {}), "");
+  assert.match(fieldPlaceholder(secret), /…9f31/);
+  assert.match(fieldPlaceholder(secret), /leave blank to keep it/);
+
+  const url = key({ name: "ANTHROPIC_BASE_URL", secret: false, set: true,
+                    hint: "https://***@gw/v1", masked: true });
+  assert.equal(fieldValue(url, {}), "",
+    "a URL whose credentials were stripped is masked, non-secret or not");
+});
+
+test("an unset field says so, and shows nothing", () => {
+  const k = key({ set: false, hint: "", masked: false });
+  assert.equal(fieldValue(k, {}), "");
+  assert.equal(fieldPlaceholder(k), "not set");
+});
+
+test("a set secret does not look like an unset one", () => {
+  // Both fields are empty; only the placeholder distinguishes them.
+  const set = key({ set: true, hint: "…9f31", masked: true });
+  const unset = key({ set: false, hint: "", masked: false });
+  assert.notEqual(fieldPlaceholder(set), fieldPlaceholder(unset));
+});
+
+test("what the user typed always wins over the saved value", () => {
+  const k = key({ name: "ANTHROPIC_MODEL", secret: false, set: true,
+                  hint: "claude-opus-5", masked: false });
+  assert.equal(fieldValue(k, { ANTHROPIC_MODEL: "claude-sonnet-5" }), "claude-sonnet-5");
+  // Including an explicit clear, which must not fall back to the saved value.
+  assert.equal(fieldValue(k, { ANTHROPIC_MODEL: "" }), "");
 });

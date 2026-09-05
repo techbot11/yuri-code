@@ -259,6 +259,7 @@ class TmuxClaudeRunner(ClaudeRunner):
         if ctrl_real != root_real and not ctrl_real.startswith(root_real + os.sep):
             raise ValueError("session control dir escapes the session store")
         os.makedirs(os.path.join(s.ctrl, "decisions"), exist_ok=True)
+        self._write_agent_env(s)
         self._write_settings(s)
         self._write_meta(s)
         self._write_mode(s)
@@ -275,7 +276,16 @@ class TmuxClaudeRunner(ClaudeRunner):
         # can contain quotes, `;`, or `$(...)`.
         agents_flag = f"--agents {shlex.quote(s.agents_json)} " if s.agents_json else ""
         agent_flag = f"--agent {shlex.quote(s.agent_slug)} " if s.agent_slug else ""
+        # Source the credentials rather than putting them on the command line:
+        # `tmux new-session -e VAR=secret` and a `VAR=secret claude ...` prefix
+        # both land the value in a process's argv, where `ps` can read it. The
+        # file is 0600 in the session's own control dir. Guarded with -f so a
+        # missing file is not an error -- there is nothing to pass when the user
+        # has configured nothing.
+        env_file = shlex.quote(os.path.join(s.ctrl, "agent.env"))
+        load_env = f"[ -f {env_file} ] && {{ set -a; . {env_file}; set +a; }}; "
         inner = (
+            f"{load_env}"
             f"VC_CTRL={shlex.quote(s.ctrl)} "
             f"claude {claude_id_arg} {model_flag}"
             f"--permission-mode {shlex.quote(s.mode)} "
@@ -328,6 +338,31 @@ class TmuxClaudeRunner(ClaudeRunner):
         await self._spawn(s, f"--resume {shlex.quote(session_id)}")
         log.info("tmux session %s resumed in %s (chrome=%s)", session_id, cwd, ENABLE_CHROME)
         return session_id
+
+    def _write_agent_env(self, s: _TmuxSession) -> None:
+        """Hand the agent the credentials this process holds.
+
+        A tmux pane inherits the tmux SERVER's environment, not ours, and that
+        server is typically days old -- so anything Setup saved after it
+        started is invisible to `claude`, which then falls back to OAuth and
+        asks the user to log in. That was a live bug, not a hypothetical.
+
+        Written even when empty (as an empty file) so a rehydrated session
+        never sources a stale file from a previous configuration.
+        """
+        path = os.path.join(s.ctrl, "agent.env")
+        tmp = path + ".tmp"
+        # 0600 from the moment of creation: writing then chmodding leaves a
+        # window where another user on the machine can read the key.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as f:
+            for k, v in config.agent_child_env().items():
+                # Single-quoted for `.` to read back verbatim; a literal quote
+                # inside a value is escaped the POSIX way. A newline cannot
+                # appear here -- PUT /yuri/config refuses one.
+                f.write(f"{k}='{v.replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'\n")
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
 
     def _write_settings(self, s: _TmuxSession) -> None:
         py = shlex.quote(sys.executable)

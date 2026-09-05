@@ -262,6 +262,37 @@ def masked_hint(value: str, *, secret: bool = True) -> str:
     return f"…{value[-4:]}" if len(value) > 8 else "set"
 
 
+# The variables an agent child needs that this process may only have learned
+# at runtime -- Setup writes them into our own environment (see PUT
+# /yuri/config), and a shell export gives them to us too.
+#
+# A tmux pane does NOT inherit them. `tmux new-session` hands the child the
+# tmux SERVER's environment, captured whenever that server first started,
+# which is routinely days earlier: measured on a live machine, a pane created
+# minutes after Setup saved an ANTHROPIC_AUTH_TOKEN still saw zero
+# ANTHROPIC_* variables, and `claude` fell back to OAuth and asked to log in.
+# So they have to be handed over explicitly -- see tmux_runner._write_agent_env.
+#
+# The SDK backend needs none of this: it spawns in-process and inherits
+# os.environ directly.
+AGENT_ENV_VARS: tuple[str, ...] = (
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+)
+
+
+def agent_child_env() -> dict[str, str]:
+    """The AGENT_ENV_VARS that are actually set, for handing to an agent child.
+    Absent and blank are the same thing: a blank would shadow whatever the
+    child would otherwise have found for itself."""
+    out: dict[str, str] = {}
+    for k in AGENT_ENV_VARS:
+        v = (os.getenv(k) or "").strip()
+        if v:
+            out[k] = v
+    return out
+
+
 def managed_status() -> list[dict]:
     """Every managed key: whether it is set, a hint, where it came from, and
     what changing it takes effect on.
@@ -271,11 +302,17 @@ def managed_status() -> list[dict]:
     out = []
     for k in MANAGED_KEYS:
         raw = (os.getenv(k.name) or "").strip()
+        hint = masked_hint(raw, secret=k.secret) if raw else ""
         out.append({
             "name": k.name, "label": k.label, "secret": k.secret,
             "effect": k.effect, "blurb": k.blurb,
             "set": bool(raw),
-            "hint": masked_hint(raw, secret=k.secret) if raw else "",
+            "hint": hint,
+            # Whether `hint` HIDES something rather than being the value. The
+            # Setup screen pre-fills a field only when it does not: a secret's
+            # hint is "...9f31", and a non-secret URL's userinfo is stripped,
+            # so pre-filling either would save the mask as the value.
+            "masked": bool(raw) and hint != raw,
             "source": _source_of(k.name),
         })
     return out

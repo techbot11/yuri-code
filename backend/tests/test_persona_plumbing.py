@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -122,10 +123,13 @@ class TmuxAgentsShellEscapingTests(_TmuxHarness):
 
         # No extra words: the hostile `;` and `$(...)` must not have split the
         # command line into more shell tokens than the well-formed pieces
-        # (VC_CTRL=..., claude, --session-id, <uuid>, --model, opus,
-        # --permission-mode, default, --agents, <json>, --agent, <slug>,
-        # --settings, <path>) account for.
-        self.assertEqual(len(tokens), 14, f"unexpected word count in: {tokens!r}")
+        # account for. Thirteen of these are the credential prelude that hands
+        # the pane what the tmux server's stale environment lacks --
+        # `[ -f <path> ] && { set -a; . <path>; set +a; };` -- and the other
+        # fourteen are VC_CTRL=..., claude, --session-id, <uuid>, --model,
+        # opus, --permission-mode, default, --agents, <json>, --agent, <slug>,
+        # --settings, <path>.
+        self.assertEqual(len(tokens), 27, f"unexpected word count in: {tokens!r}")
 
     async def test_no_agent_fields_means_no_extra_flags(self):
         inner = await self._spawn_and_capture(None, None)
@@ -486,3 +490,75 @@ class TmuxModelFlagTests(_TmuxHarness):
             inner = await self._inner(default_model=None, model=None)
         tokens = shlex.split(inner)
         self.assertEqual(tokens[tokens.index("--model") + 1], "haiku")
+
+
+# ---------------------------------------------------------------------------
+# Credentials must reach the agent. A tmux pane inherits the tmux SERVER's
+# environment, captured whenever that server started -- so anything Setup
+# saved afterwards is invisible to `claude`, which falls back to OAuth and
+# asks the user to log in. Measured on a live machine: a pane created minutes
+# after a token was saved saw zero ANTHROPIC_* variables.
+# ---------------------------------------------------------------------------
+class TmuxAgentEnvTests(_TmuxHarness):
+    async def _spawn(self):
+        runner = tmux_runner.TmuxClaudeRunner()
+        fake = _FakeTmux()
+        runner._tmux = fake
+        handle = await runner.start("/tmp", mode="default")
+        (call,) = [c for c in fake.calls if c[0] == "new-session"]
+        return runner, handle, call[-1]
+
+    async def test_the_credentials_are_sourced_not_put_on_the_command_line(self):
+        # `tmux -e VAR=secret` and a `VAR=secret claude` prefix both land the
+        # value in an argv that `ps` can read.
+        with mock.patch.dict(os.environ, {"ANTHROPIC_AUTH_TOKEN": "tok-SECRET-VALUE"}):
+            _, _, inner = await self._spawn()
+        self.assertNotIn("tok-SECRET-VALUE", inner)
+        self.assertIn("agent.env", inner)
+        self.assertIn("set -a", inner)
+
+    async def test_the_env_file_is_written_at_0600_with_what_is_set(self):
+        with mock.patch.dict(os.environ, {"ANTHROPIC_AUTH_TOKEN": "tok-1",
+                                          "ANTHROPIC_BASE_URL": "https://gw/v1"}):
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+            runner, handle, _ = await self._spawn()
+        path = os.path.join(runner._sessions[handle].ctrl, "agent.env")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        with open(path) as f:
+            body = f.read()
+        self.assertIn("ANTHROPIC_AUTH_TOKEN=", body)
+        self.assertIn("ANTHROPIC_BASE_URL=", body)
+        # A key nobody configured must not be written as empty: a blank would
+        # shadow whatever the child would otherwise find for itself.
+        self.assertNotIn("ANTHROPIC_API_KEY", body)
+
+    async def test_a_hostile_value_round_trips_through_the_shell(self):
+        hostile = "tok-with-'quote'-and-$DOLLAR-and-`tick`"
+        with mock.patch.dict(os.environ, {"ANTHROPIC_AUTH_TOKEN": hostile}):
+            runner, handle, _ = await self._spawn()
+        path = os.path.join(runner._sessions[handle].ctrl, "agent.env")
+        out = subprocess.run(
+            ["/bin/sh", "-c", f"set -a; . {shlex.quote(path)}; set +a; "
+                              'printf %s "$ANTHROPIC_AUTH_TOKEN"'],
+            capture_output=True, text=True)
+        self.assertEqual(out.stdout, hostile,
+                         "the value a shell recovers must equal the value we were given")
+
+    async def test_an_empty_file_is_still_written(self):
+        # A rehydrated session must never source a stale file from a previous
+        # configuration.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for k in config.AGENT_ENV_VARS:
+                os.environ.pop(k, None)
+            runner, handle, _ = await self._spawn()
+        path = os.path.join(runner._sessions[handle].ctrl, "agent.env")
+        self.assertTrue(os.path.isfile(path))
+        with open(path) as f:
+            self.assertEqual(f.read(), "")
+
+    async def test_agent_child_env_skips_blanks(self):
+        with mock.patch.dict(os.environ, {"ANTHROPIC_MODEL": "   ",
+                                          "ANTHROPIC_BASE_URL": "https://gw/v1"}):
+            got = config.agent_child_env()
+        self.assertNotIn("ANTHROPIC_MODEL", got)
+        self.assertEqual(got["ANTHROPIC_BASE_URL"], "https://gw/v1")
