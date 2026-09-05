@@ -8,7 +8,7 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "types": ["node", "electron"]
+    "types": ["node"]
   },
   "include": ["main/**/*.ts", "preload/**/*.ts", "lib/**/*.ts"],
   "exclude": ["lib/**/*.test.ts", "out"]

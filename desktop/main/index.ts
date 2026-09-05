@@ -6,6 +6,7 @@
 // pure function with tests, because there is no Electron test environment.
 import { app, BrowserWindow, shell } from "electron";
 import * as path from "node:path";
+import { isAppUrl } from "../lib/urls";
 
 const FRONTEND_URL = "http://localhost:3000";
 
@@ -22,7 +23,6 @@ function createWindow(): BrowserWindow {
     backgroundColor: "#1a1917", // --bg from frontend/app/globals.css
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
-      sandbox: false,
       // Load-bearing, not a preference: Electron throttles timers in a hidden
       // window, and this app's premise is that a hidden window keeps talking.
       backgroundThrottling: false,
@@ -37,7 +37,7 @@ function createWindow(): BrowserWindow {
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", (event, url) => {
-    if (!url.startsWith(FRONTEND_URL)) {
+    if (!isAppUrl(url, FRONTEND_URL)) {
       event.preventDefault();
       void shell.openExternal(url);
     }
