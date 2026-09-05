@@ -27,9 +27,62 @@ export function repoRoot(): string {
   return path.resolve(__dirname, "../../..");
 }
 
-const children: ChildProcess[] = [];
-let lastStderr: Record<string, string> = {};
-let died: Record<string, boolean> = {};
+// How long SIGTERM gets before SIGKILL, and how long SIGKILL gets before a
+// child is declared un-killable. The first covers uvicorn's own 3s graceful
+// shutdown; the second exists only so `stopServers()` can tell "gone" from
+// "still holding the port" before it returns.
+const DRAIN_MS = 3_500;
+const SIGKILL_GRACE_MS = 1_500;
+
+type ChildName = "backend" | "frontend";
+
+/** One child of one boot cycle. Every piece of per-child state here used to
+ *  be a module-level `Record<string, …>` keyed by name, reset wholesale by
+ *  stopServers() -- which meant a child whose `exit` arrived after that reset
+ *  read `undefined.trim()` and threw an UNCAUGHT exception in the main
+ *  process, killing the window and orphaning the new boot's children. State
+ *  that belongs to one child now lives with that child and cannot be reset
+ *  out from under a handler that is still holding a reference to it. */
+type ChildRec = {
+  name: ChildName;
+  proc: ChildProcess;
+  /** Tail of this child's own output, for a failure detail. */
+  stderr: string;
+  /** Known dead, or deliberately killed. Read by this cycle's health poll --
+   *  per-child, so draining cycle A cannot un-kill what cycle B is watching
+   *  (the old shared map's reset made an orphaned poll forget its child had
+   *  been killed and run to its original 60s deadline against a port the NEW
+   *  backend by then owned). */
+  dead: boolean;
+  /** Drop the stdout/stderr subscriptions. */
+  detach: () => void;
+};
+
+/** One call to startServers() and the children it spawned. `drained` is the
+ *  cycle's own kill switch: once stopServers() has disowned it, nothing from
+ *  it -- a late `exit`, an orphaned health poll -- may report into the boot
+ *  that comes next. */
+type Cycle = { children: ChildRec[]; drained: boolean };
+
+// Every cycle whose children are not confirmed gone. Normally one; briefly
+// two if a retry overlaps, and it keeps a cycle whose child survived SIGKILL
+// so a later stopServers() still has a handle to try again with.
+let cycles: Cycle[] = [];
+
+/** Is this child still running?
+ *
+ *  NOT `!child.killed`: Node sets `killed` when the signal is SENT, not when
+ *  the process dies, so a `!killed` guard is true exactly never after a
+ *  SIGTERM and any escalation behind it is dead code. `exitCode`/`signalCode`
+ *  are both null until the process is actually reaped, which is the fact
+ *  wanted here. */
+function alive(rec: ChildRec): boolean {
+  return rec.proc.exitCode === null && rec.proc.signalCode === null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
 /** Is something already listening on `port`? A successful CONNECT means yes.
  *  Bounded, because a port that neither accepts nor refuses would otherwise
@@ -103,26 +156,40 @@ async function pollUntil(deadline: number, isDead: () => boolean,
   return false;
 }
 
-function track(name: "backend" | "frontend", child: ChildProcess,
-               onEvent: (ev: BootEvent) => void): void {
-  children.push(child);
-  lastStderr[name] = "";
+function track(cycle: Cycle, name: ChildName, child: ChildProcess,
+               emit: (ev: BootEvent) => void): ChildRec {
   const keep = (buf: Buffer) => {
     // Keep only the tail: a Python traceback is what the user needs, and an
     // unbounded buffer of a server's whole log is not.
-    lastStderr[name] = (lastStderr[name] + buf.toString()).slice(-4000);
+    rec.stderr = (rec.stderr + buf.toString()).slice(-4000);
   };
+  const rec: ChildRec = {
+    name, proc: child, stderr: "", dead: false,
+    detach: () => {
+      child.stdout?.off("data", keep);
+      child.stderr?.off("data", keep);
+    },
+  };
+  // Pushed immediately, before anything can go wrong below: a spawned child
+  // that is not tracked is a child nothing can ever kill.
+  cycle.children.push(rec);
   child.stdout?.on("data", keep);
   child.stderr?.on("data", keep);
   child.on("exit", (code) => {
-    died[name] = true;
+    rec.dead = true;
+    rec.detach();
     // An exit BEFORE ready is a boot failure; after ready it is a crash the
-    // app has to survive, and 2b's supervisor owns restarting it.
+    // app has to survive, and 2b's supervisor owns restarting it. `emit` is
+    // the cycle-scoped reporter: an exit that arrives after this cycle was
+    // drained (a backend exiting non-zero at t~4s during its own SIGTERM
+    // shutdown, while the retry that killed it has already booted afresh)
+    // reports to nobody rather than into the new boot's state.
     if (code !== 0) {
-      onEvent({ type: "failed", child: name,
-                detail: lastStderr[name].trim() || `${name} exited with code ${code}` });
+      emit({ type: "failed", child: name,
+             detail: rec.stderr.trim() || `${name} exited with code ${code}` });
     }
   });
+  return rec;
 }
 
 export async function startServers(env: Env,
@@ -130,6 +197,16 @@ export async function startServers(env: Env,
                                    ports: Ports = defaultPorts()): Promise<void> {
   const root = repoRoot();
   const deadline = Date.now() + HEALTH_TIMEOUT_MS;
+
+  // This call's own cycle. Everything below reports through `emit` rather
+  // than through `onEvent` directly, so that stopServers() disowning this
+  // cycle silences ALL of it at once -- the children's exit handlers and the
+  // two health polls alike. The polls in particular are deliberately
+  // orphanable: index.ts fire-and-forgets startServers() so a merely slow
+  // backend cannot hold a retry hostage, which means a poll from the
+  // previous cycle is routinely still running when the next one starts.
+  const cycle: Cycle = { children: [], drained: false };
+  const emit = (ev: BootEvent) => { if (!cycle.drained) onEvent(ev); };
 
   // Refuse to start into a port someone else owns, rather than health-check
   // our way into a false "ready": we cannot tell our own child apart from a
@@ -142,19 +219,23 @@ export async function startServers(env: Env,
     portInUse(ports.frontend),
   ]);
   if (backendBusy) {
-    onEvent({ type: "failed", child: "backend", detail: portBusyDetail(ports.backend, "backend") });
+    emit({ type: "failed", child: "backend", detail: portBusyDetail(ports.backend, "backend") });
   }
   if (frontendBusy) {
-    onEvent({ type: "failed", child: "frontend", detail: portBusyDetail(ports.frontend, "frontend") });
+    emit({ type: "failed", child: "frontend", detail: portBusyDetail(ports.frontend, "frontend") });
   }
   if (backendBusy || frontendBusy) return;
+
+  // Registered before the first spawn: from here on, anything this function
+  // starts is something stopServers() can find and kill.
+  cycles.push(cycle);
 
   const backend = spawn(
     path.join(root, "backend/.venv/bin/python"),
     ["-m", "uvicorn", "main:app", "--port", String(ports.backend),
      "--log-level", "info", "--timeout-graceful-shutdown", "3"],
     { cwd: path.join(root, "backend"), env, stdio: ["ignore", "pipe", "pipe"] });
-  track("backend", backend, onEvent);
+  const backendRec = track(cycle, "backend", backend, emit);
 
   // ELECTRON_RUN_AS_NODE makes this Electron binary behave as plain Node, so
   // Next runs on Electron's own Node 22.16 and no second runtime is bundled
@@ -166,39 +247,73 @@ export async function startServers(env: Env,
     { cwd: path.join(root, "frontend"),
       env: { ...env, ELECTRON_RUN_AS_NODE: "1" },
       stdio: ["ignore", "pipe", "pipe"] });
-  track("frontend", frontend, onEvent);
+  const frontendRec = track(cycle, "frontend", frontend, emit);
 
   // Health-check both in parallel: the frontend does not depend on the
   // backend to LISTEN, only to answer proxied requests, so serialising the
   // two would add the backend's start time to every boot for no reason.
   await Promise.all([
-    pollUntil(deadline, () => died.backend,
+    pollUntil(deadline, () => backendRec.dead,
               () => backendAnswers(`http://127.0.0.1:${ports.backend}/health`)).then((up) =>
-      onEvent(up ? { type: "ready", child: "backend" }
-                 : { type: "failed", child: "backend",
-                     detail: lastStderr.backend.trim() || "the backend never answered" })),
-    pollUntil(deadline, () => died.frontend,
+      emit(up ? { type: "ready", child: "backend" }
+              : { type: "failed", child: "backend",
+                  detail: backendRec.stderr.trim() || "the backend never answered" })),
+    pollUntil(deadline, () => frontendRec.dead,
               () => anyAnswers(`http://127.0.0.1:${ports.frontend}/`)).then((up) =>
-      onEvent(up ? { type: "ready", child: "frontend" }
-                 : { type: "failed", child: "frontend",
-                     detail: lastStderr.frontend.trim() || "the frontend never answered" })),
+      emit(up ? { type: "ready", child: "frontend" }
+              : { type: "failed", child: "frontend",
+                  detail: frontendRec.stderr.trim() || "the frontend never answered" })),
   ]);
 }
 
-/** Stop both children. tmux panes are deliberately NOT touched:
- *  VC_KILL_SESSIONS_ON_SHUTDOWN already defaults off so a restart can
- *  rehydrate them, and quitting the UI must not kill an agent mid-task. */
+/** Stop every child this module has started. tmux panes are deliberately NOT
+ *  touched: VC_KILL_SESSIONS_ON_SHUTDOWN already defaults off so a restart
+ *  can rehydrate them, and quitting the UI must not kill an agent mid-task.
+ *
+ *  Three properties this has to hold, each of them a bug that was measured:
+ *
+ *  1. Nothing from a drained cycle may report into the boot that follows it
+ *     -- neither a late `exit` nor an orphaned health poll. `drained` plus
+ *     the per-child `detach()` is what makes that so.
+ *  2. A killed child must LOOK killed to its own cycle's poll (`dead`),
+ *     which is why that flag is per-child rather than a shared map this
+ *     function used to clear.
+ *  3. A child that is still running when this returns must still be
+ *     reachable. Emptying the handle list unconditionally is what turned a
+ *     `next start` that took longer than DRAIN_MS to close into an
+ *     unrecoverable loop: the port stayed held, startServers() refused to
+ *     spawn into it and blamed `bin/yuri up`, and every later retry drained
+ *     an empty list and killed nothing. Survivors stay tracked. */
 export async function stopServers(): Promise<void> {
-  for (const child of children) {
-    if (!child.killed) child.kill("SIGTERM");
+  const draining = cycles;
+  cycles = [];
+  for (const cycle of draining) {
+    cycle.drained = true;
+    for (const rec of cycle.children) {
+      rec.detach();
+      rec.dead = true;
+      if (alive(rec)) rec.proc.kill("SIGTERM");
+    }
   }
-  // Give uvicorn its 3s graceful shutdown, then stop waiting. A child that
-  // ignores SIGTERM must not hold the app open.
-  await new Promise((r) => setTimeout(r, 3500));
-  for (const child of children) {
-    if (!child.killed) child.kill("SIGKILL");
+  const recs = draining.flatMap((c) => c.children);
+  if (recs.length === 0) return;
+
+  // Give uvicorn its 3s graceful shutdown, then escalate. A child that
+  // ignores SIGTERM must not hold the app open -- but it must not be
+  // forgotten about either.
+  await sleep(DRAIN_MS);
+  const stubborn = recs.filter(alive);
+  for (const rec of stubborn) rec.proc.kill("SIGKILL");
+  if (stubborn.length > 0) await sleep(SIGKILL_GRACE_MS);
+
+  const survivors = recs.filter(alive);
+  if (survivors.length > 0) {
+    // Uninterruptible-sleep territory, or a signal we are not permitted to
+    // send. Keep the handles: this is exactly the state in which a later
+    // retry must be able to try again instead of draining nothing. Names and
+    // pids only -- never a child's output or its environment.
+    console.error("[yuri] still running after SIGKILL, and still holding its port: " +
+      survivors.map((r) => `${r.name} (pid ${r.proc.pid})`).join(", "));
+    cycles.push({ children: survivors, drained: true });
   }
-  children.length = 0;
-  lastStderr = {};
-  died = {};
 }
