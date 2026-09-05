@@ -16,17 +16,16 @@
 // playback is rendered through Web Audio and tapped into a MediaStream that we
 // hand to onRemoteStream — the orb analyser then works unchanged.
 
-import {
+import type {
   RealtimeEvent,
   RealtimeOptions,
   ToolDef,
   VoiceSession,
   VoiceUsage,
-  emptyUsage,
-  recomputeCost,
-} from "./voice";
-import { authHeaders } from "./auth";
-import { getMicStream, micErrorMessage } from "./mic";
+} from "./voice.ts";
+import { emptyUsage, recomputeCost } from "./voice.ts";
+import { authHeaders } from "./auth.ts";
+import { getMicStream, micErrorMessage } from "./mic.ts";
 import {
   forceDrain, hasPending, newSpeechQueue, noteInterrupted, noteTurnComplete,
   noteTurnStart, reset, submit,
@@ -135,6 +134,12 @@ export class GeminiSession implements VoiceSession {
   private playDest?: MediaStreamAudioDestinationNode;
   private playCursor = 0; // next scheduled playback time
   private liveSources = new Set<AudioBufferSourceNode>();
+  // turnComplete means the model has sent all its chunks, but playPcm just
+  // SCHEDULES them against playCursor -- seconds of queued PCM can still be
+  // ahead when it arrives. True from a turnComplete that still has sources
+  // playing until the last one drains (see playPcm's node.onended) or the
+  // queue is thrown away (stopAllPlayback, e.g. a barge-in).
+  private turnClosePending = false;
 
   private tools: ToolDef[] = [];
   private setupDone = false;
@@ -588,7 +593,17 @@ export class GeminiSession implements VoiceSession {
           emit({ type: "transcript", role: "assistant", text: this.assistantText, final: true });
           this.assistantText = "";
         }
-        emit({ type: "state", state: "listening" });
+        // She has sent every chunk of this turn, but playPcm only SCHEDULES
+        // them against playCursor -- audio can still be queued/playing well
+        // after turnComplete arrives. Only announce "listening" now if
+        // nothing is left to play; otherwise remember the turn closed and
+        // let the drain in playPcm's node.onended announce it once the last
+        // source actually finishes.
+        if (this.liveSources.size === 0) {
+          emit({ type: "state", state: "listening" });
+        } else {
+          this.turnClosePending = true;
+        }
         // The turn is closed: she finished the sentence. Exactly one held
         // update goes out, so each still gets its own spoken response.
         this.release(noteTurnComplete(this.speech));
@@ -663,7 +678,17 @@ export class GeminiSession implements VoiceSession {
     node.start(startAt);
     this.playCursor = startAt + buf.duration;
     this.liveSources.add(node);
-    node.onended = () => this.liveSources.delete(node);
+    node.onended = () => {
+      this.liveSources.delete(node);
+      // The turn closed while this (or a later-scheduled) chunk was still
+      // playing -- now that everything queued has actually finished, this is
+      // the true end of her speaking, so announce it here instead of at
+      // turnComplete.
+      if (this.turnClosePending && this.liveSources.size === 0) {
+        this.turnClosePending = false;
+        this.opts.onEvent({ type: "state", state: "listening" });
+      }
+    };
   }
 
   private stopAllPlayback() {
@@ -676,6 +701,15 @@ export class GeminiSession implements VoiceSession {
     }
     this.liveSources.clear();
     this.playCursor = 0;
+    // A turn that closed while audio was still queued (turnClosePending) can
+    // no longer be settled by the natural drain above -- every source was
+    // just thrown away without its onended ever seeing an empty set. Settle
+    // here, or a barge-in right after a turn closes leaves the state stuck
+    // on "speaking" forever.
+    if (this.turnClosePending) {
+      this.turnClosePending = false;
+      this.opts.onEvent({ type: "state", state: "listening" });
+    }
   }
 
   // Gemini usageMetadata: promptTokenCount / responseTokenCount with per-modality

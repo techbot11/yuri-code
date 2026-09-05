@@ -8,19 +8,18 @@
 //  5. On a function_call event, POST it to /api/tools/execute, then return a
 //     function_call_output item and ask the model to continue.
 
-import {
+import type {
   RealtimeEvent,
   RealtimeOptions,
   ToolDef,
   VoiceSession,
   VoiceUsage,
-  emptyUsage,
-  recomputeCost,
-} from "./voice";
-import { authHeaders } from "./auth";
-import { enqueueInjection, type PendingInjection } from "./narration";
+} from "./voice.ts";
+import { emptyUsage, recomputeCost } from "./voice.ts";
+import { authHeaders } from "./auth.ts";
+import { enqueueInjection, type PendingInjection } from "./narration.ts";
 
-import { getMicStream, micErrorMessage } from "./mic";
+import { getMicStream, micErrorMessage } from "./mic.ts";
 
 const CALLS_URL = "https://api.openai.com/v1/realtime/calls";
 
@@ -64,6 +63,15 @@ export class RealtimeSession implements VoiceSession {
   // nothing to do.
   private continuationFallback: ReturnType<typeof setTimeout> | null = null;
   private static CONTINUATION_FALLBACK_MS = 1500;
+  // True from output_audio_buffer.started until output_audio_buffer.stopped.
+  // response.completed/response.done fire when the MODEL finishes generating —
+  // the audio it produced can still be queued and playing for a while after
+  // that. Announcing "listening" on those events flips the tray/orb state
+  // mid-sentence; output_audio_buffer.stopped is the true end-of-playback
+  // signal, so a "listening" driven by response completion is deferred until
+  // this is false. Stays false for a response that never spoke (a tool-only
+  // turn), so that path still reaches "listening" immediately below.
+  private audioPlaying = false;
   // Function-call arguments stream as response.function_call_arguments.delta and
   // are NOT included in the conversation.item.added item that Azure uses to
   // surface the call — so accumulate them by call_id and dispatch with the
@@ -443,11 +451,22 @@ export class RealtimeSession implements VoiceSession {
         emit({ type: "state", state: "thinking" });
         break;
       case "output_audio_buffer.started":
+        this.audioPlaying = true;
         emit({ type: "state", state: "speaking" });
         break;
-      case "response.completed":
       case "output_audio_buffer.stopped":
+        // The true end-of-playback signal — always safe to announce.
+        this.audioPlaying = false;
         emit({ type: "state", state: "listening" });
+        break;
+      case "response.completed":
+        // The model is done generating, but audio it already produced may
+        // still be buffered and playing (output_audio_buffer.stopped hasn't
+        // fired yet). Only announce "listening" here when nothing is playing
+        // — otherwise output_audio_buffer.stopped announces it when playback
+        // truly ends. A response with no audio at all (audioPlaying never set)
+        // still reaches "listening" here, so a tool-only turn doesn't stall.
+        if (!this.audioPlaying) emit({ type: "state", state: "listening" });
         break;
 
       // user speech transcription
@@ -507,8 +526,13 @@ export class RealtimeSession implements VoiceSession {
           emit({ type: "state", state: "thinking" });
         } else {
           // Nothing pending — drain any queued narration system messages.
+          // response.done means the model is fully done, but its audio (if
+          // any) can still be playing — same deferral as response.completed
+          // above; output_audio_buffer.stopped announces "listening" once
+          // playback actually ends. A tool-only turn never sets audioPlaying,
+          // so it still reaches "listening" right here.
           this.drainPendingInjections();
-          emit({ type: "state", state: "listening" });
+          if (!this.audioPlaying) emit({ type: "state", state: "listening" });
         }
         break;
       }
