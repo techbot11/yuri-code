@@ -1,8 +1,11 @@
 // The tray: Yuri's presence while her window is hidden.
 //
-// Its own module for the same reason servers.ts and shellEnv.ts are: the
-// decision of WHAT state to show is pure and lives in ../lib/tray.ts, and
-// this file is only the Electron plumbing that renders it. Keeping it out of
+// Its own module for the same reason servers.ts and shellEnv.ts are: this
+// file is only the Electron plumbing. The vocabulary it renders (the states
+// and their labels) is pure and lives in ../lib/tray.ts; the decision of
+// WHICH state to show is not made in this process at all -- the renderer
+// makes it in frontend/lib/trayState.ts and sends the answer over
+// tray:state, which setTrayState() below validates. Keeping it out of
 // index.ts also means currentTrayState()/trayMenuTemplate() are honest
 // accessors -- part of this module's real API -- rather than `_forVerification`
 // exports bolted onto the app's entry point.
@@ -80,10 +83,25 @@ export function createTray(show: () => void): void {
   refreshTray();
 }
 
-/** Apply a state the renderer reported over IPC. Ignores anything not in
- *  TRAY_STATES: an unknown string would reach setImage and blank the icon. */
+/** Apply a state the renderer reported over IPC. Rejects anything not in
+ *  TRAY_STATES: an unknown string would reach setImage and blank the icon.
+ *
+ *  The rejection is LOGGED, not silent. The rule that picks a state lives in
+ *  frontend/lib/trayState.ts, whose TrayState union is an independent
+ *  declaration in a separately compiled process -- there is no compile-time
+ *  link to ../lib/tray.ts's union and no test can make one (see that file).
+ *  So this log is the only thing standing between "a state was added to the
+ *  frontend and not to TRAY_STATES" and a tray that just keeps showing the
+ *  previous icon forever with nothing anywhere saying why. */
 export function setTrayState(state: string): void {
-  if (!isTrayState(state)) return;
+  if (!isTrayState(state)) {
+    // The rejected slug only, bounded: this is a value the renderer chose
+    // from a fixed vocabulary, never environment or conversation content.
+    console.error("[yuri] tray: ignoring a state that is not in TRAY_STATES: " +
+      JSON.stringify(String(state).slice(0, 40)) +
+      " — add it to desktop/lib/tray.ts (and give it an icon) or stop sending it");
+    return;
+  }
   if (state === current) return; // avoid rebuilding the menu on every poll
   current = state;
   refreshTray();

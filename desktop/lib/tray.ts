@@ -1,43 +1,27 @@
-// What the tray says she is doing.
+// The tray's vocabulary: which states exist, and what each one is called.
 //
-// Pure so `node --test` reaches it. The ORDER is the substance: this is a
-// priority list, not a set of independent flags, and getting it wrong means
-// the one state worth interrupting for gets hidden behind a chattier one.
+// It does NOT decide which state to show. That rule lives in exactly one
+// place -- frontend/lib/trayState.ts -- because only the renderer knows the
+// facts it needs (the voice session's state, running missions, pending
+// approvals). The renderer decides and sends the answer over the tray:state
+// channel; main/tray.ts validates it against TRAY_STATES and renders it.
+//
+// This file used to carry a second implementation of that rule (trayState()
+// over a TrayFacts struct), with a comment on each side claiming their tests
+// cross-checked the two. Nothing called it, nothing compared them, and the
+// ten tests over it passed for the wrong reason -- so it is gone.
+//
+// What remains is a real seam, and worth stating plainly: the TrayState union
+// below and the one in frontend/lib/trayState.ts are INDEPENDENT declarations
+// in two separately compiled processes. There is no compile-time link between
+// them and no test can create one. A state added to the frontend's union and
+// not to TRAY_STATES here is caught only at runtime, by setTrayState()
+// logging what it rejected (main/tray.ts).
+//
+// Pure so `node --test` reaches it.
 
 export type TrayState =
   "asleep" | "listening" | "thinking" | "speaking" | "working" | "needs-you";
-
-export type TrayFacts = {
-  voiceConnected: boolean;
-  speaking: boolean;
-  thinking: boolean;
-  missionsRunning: number;
-  approvalsPending: number;
-};
-
-/** Highest priority first.
- *
- *  `needs-you` outranks everything including `asleep`: voice being
- *  disconnected does not make a blocked agent less blocked, and a blocked
- *  agent behind a hidden window is exactly what this tray is for.
- *
- *  `working` outranks `speaking` because the user can already HEAR that she
- *  is speaking; that work is continuing in the background is the fact the
- *  tray can add.
- *
- *  `thinking` outranks `listening` but not `speaking`: composing a reply or
- *  running a tool call between turns is not the same as taking input, and
- *  claiming "listening" through a long agent-driving stretch is exactly the
- *  lie this state exists to fix. It does NOT outrank `speaking` -- she can
- *  only be doing one at a time, and the user can already hear her voice. */
-export function trayState(f: TrayFacts): TrayState {
-  if (f.approvalsPending > 0) return "needs-you";
-  if (f.missionsRunning > 0) return "working";
-  if (f.speaking) return "speaking";
-  if (f.thinking) return "thinking";
-  if (f.voiceConnected) return "listening";
-  return "asleep";
-}
 
 /** The menu's first line. Plain words, never the slug. */
 export function trayLabel(s: TrayState): string {
@@ -53,8 +37,20 @@ export function trayLabel(s: TrayState): string {
   }
 }
 
-/** Every state, for validating what a renderer sends. The IPC handler checks
- *  against this, so a value missing here silently ignores a real state and a
- *  value that is not a TrayState would blank the icon. */
-export const TRAY_STATES: TrayState[] =
-  ["asleep", "listening", "thinking", "speaking", "working", "needs-you"];
+/** Every state, once. A Record rather than an array so `tsc` enforces
+ *  completeness: a member added to TrayState with no key here fails to
+ *  compile, and a key that is not a member fails too. An array literal could
+ *  not do that -- which is precisely how the old hand-maintained list was
+ *  free to drift from the union it claimed to cover. */
+const ALL_STATES: Record<TrayState, true> = {
+  asleep: true, listening: true, thinking: true,
+  speaking: true, working: true, "needs-you": true,
+};
+
+/** Every state, for validating what a renderer sends -- and the only guard
+ *  on the process boundary described at the top of this file. The IPC handler
+ *  checks against it, so a value that is not a TrayState would otherwise
+ *  reach setImage() and blank the icon. DERIVED from ALL_STATES, so it cannot
+ *  fall behind this process's own union; the frontend's separate union is the
+ *  one gap left, and setTrayState() logs what it rejects for that reason. */
+export const TRAY_STATES: TrayState[] = Object.keys(ALL_STATES) as TrayState[];

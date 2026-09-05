@@ -1,10 +1,22 @@
 // What the desktop shell's tray should say, derived from what this app knows.
 //
-// The rule is duplicated from desktop/lib/tray.ts on purpose: the two run in
-// different processes with no shared module, and a frontend that imported
-// from desktop/ would break `next build` for the browser. The tests on both
-// sides pin the same priority order, so a change to one that is not made to
-// the other fails a test rather than drifting silently.
+// This is the ONLY implementation of that rule. It lives here because only
+// the renderer has the facts it needs -- the voice session's state, running
+// missions, pending approvals -- and it sends its answer to the main process
+// over the tray:state channel, which validates the string against
+// desktop/lib/tray.ts's TRAY_STATES and renders it.
+//
+// desktop/lib/tray.ts once carried a second copy of this rule, and a comment
+// here claimed the two sides' tests cross-checked each other. They never
+// did, and the copy had no caller; it has been deleted.
+//
+// What IS a live seam: the TrayState union below and the one in
+// desktop/lib/tray.ts are independent declarations in two separately
+// compiled processes, with no compile-time link and no test that can create
+// one. Adding a state here means adding it to TRAY_STATES there (and giving
+// it a menu-bar icon) -- otherwise the main process rejects it at runtime.
+// It says so in the log when it does (desktop/main/tray.ts's setTrayState),
+// which is the whole of the safety net.
 
 export type TrayState =
   "asleep" | "listening" | "thinking" | "speaking" | "working" | "needs-you";

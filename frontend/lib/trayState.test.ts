@@ -6,9 +6,10 @@ const f = (over: Partial<Parameters<typeof trayStateFor>[0]> = {}) => ({
   connected: false, vstate: "idle", missionsRunning: 0, approvalsPending: 0, ...over,
 });
 
-test("the priority order matches desktop/lib/tray.ts", () => {
-  // Duplicated deliberately (different processes, no shared module), so both
-  // sides pin the same order and a one-sided change fails here.
+test("the priority order, highest first", () => {
+  // This is the only implementation of the rule -- desktop/lib/tray.ts's
+  // copy had no caller and has been deleted -- so these assertions are not
+  // "both sides agree", they ARE the specification of the order.
   assert.equal(trayStateFor(f({ approvalsPending: 1, missionsRunning: 2,
                                 connected: true, vstate: "speaking" })), "needs-you");
   assert.equal(trayStateFor(f({ missionsRunning: 1, connected: true,
