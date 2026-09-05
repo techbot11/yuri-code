@@ -39,6 +39,29 @@ test("a line without '=' is skipped rather than becoming a blank key", () => {
   assert.deepEqual(Object.keys(got).sort(), ["HOME", "PATH"]);
 });
 
+test("a shell banner does not swallow the first variable", () => {
+  // Measured against a fake shell: without this, PATH was lost under a key
+  // made of the banner while every later variable survived.
+  const text = "Welcome!\nLast login: whenever\nPATH=/opt/homebrew/bin\0ANTHROPIC_MODEL=m\0";
+  const got = parseEnvOutput(text);
+  assert.equal(got.PATH, "/opt/homebrew/bin");
+  assert.equal(got.ANTHROPIC_MODEL, "m");
+  assert.equal(Object.keys(got).length, 2, "the banner must not become a key");
+});
+
+test("a name that is not a variable name is dropped", () => {
+  // Junk with an '=' in it must not become a key just because it parses.
+  const got = parseEnvOutput("not a name=value\0GOOD=1\0also-bad=2\0");
+  assert.deepEqual(Object.keys(got), ["GOOD"]);
+});
+
+test("a value containing a newline still round-trips", () => {
+  // The reason the delimiter is NUL and not newline in the first place. Only
+  // the KEY is newline-trimmed; the value is untouched.
+  const got = parseEnvOutput("MULTI=first\nsecond\0");
+  assert.equal(got.MULTI, "first\nsecond");
+});
+
 test("the fallback PATH covers where the tools actually live", () => {
   // These are the install locations that matter on macOS. Homebrew on Apple
   // Silicon is /opt/homebrew; Intel and older installs are /usr/local.
