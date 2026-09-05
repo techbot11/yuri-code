@@ -59,24 +59,31 @@ def _read(path: str) -> dict[str, str]:
     symlink planted at `<dir>/.env` would have its target's `IDENT=...` lines
     copied wholesale into a file the backend loads as environment at every
     boot. A symlink here is refused (ELOOP / ENOTDIR) and treated as "no
-    existing file" rather than followed."""
+    existing file" rather than followed.
+
+    Missing, a symlink, a directory, unreadable, undecodable -- all "nothing
+    to merge", and write() then replaces the path outright. The try covers the
+    ITERATION as well as the open, because O_NOFOLLOW alone does not: a
+    DIRECTORY at `<dir>/.env` opens fine and raises IsADirectoryError on the
+    first read, where the `os.path.isfile` guard this replaced returned {}. A
+    500 on contrived filesystem state is worse than a clean empty merge."""
     out: dict[str, str] = {}
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except OSError:
-        # Missing, a symlink, a directory, unreadable -- all "nothing to
-        # merge". write() then replaces the path outright.
-        return out
-    with os.fdopen(fd) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, _, v = line.partition("=")
-            k = re.sub(r"^export\s+", "", k.strip())
-            if not k.isidentifier():
-                continue
-            out[k] = v
+        with os.fdopen(fd) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k = re.sub(r"^export\s+", "", k.strip())
+                if not k.isidentifier():
+                    continue
+                out[k] = v
+    except (OSError, UnicodeDecodeError):
+        # Partial parses are discarded rather than half-merged: a file that
+        # blows up mid-read has told us nothing we can trust to rewrite.
+        return {}
     return out
 
 

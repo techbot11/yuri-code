@@ -503,6 +503,24 @@ class ConfigWriteControlChars(_Harness):
                                         json={"values": {"ANTHROPIC_MODEL": raw}})
                     self.assertEqual(r.status_code, 400, r.text)
 
+    def test_surrounding_whitespace_is_trimmed_rather_than_refused(self):
+        """The scan runs after the SAME `.strip()` clean_value applies, so it
+        refuses exactly what would survive into the file. Scanning after only
+        `.strip("\\r\\n")` made a leading or trailing TAB -- an ordinary paste
+        artifact -- a 400, where before this guard existed clean_value trimmed
+        it and the save succeeded."""
+        with mock.patch.object(setup_store, "target_dir", lambda: self.tmp.name), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            for raw in ("\tclaude-opus-5", "claude-opus-5\t", " \tclaude-opus-5\t ",
+                        "claude-opus-5\r\n"):
+                with self.subTest(raw=repr(raw)):
+                    r = self.client.put("/yuri/config",
+                                        json={"values": {"ANTHROPIC_MODEL": raw}})
+                    self.assertEqual(r.status_code, 200, r.text)
+                    self.assertEqual(os.environ.get("ANTHROPIC_MODEL"), "claude-opus-5")
+            with open(os.path.join(self.tmp.name, ".env")) as f:
+                self.assertIn("ANTHROPIC_MODEL=claude-opus-5\n", f.read())
+
     def test_an_ordinary_value_still_saves(self):
         # Proves the guard is about control characters and not about anything
         # a real key or model name contains.
@@ -565,6 +583,33 @@ class StoreDirectly(unittest.TestCase):
             self.assertFalse(os.path.islink(path))
             with open(planted) as f:
                 self.assertIn("hijacked", f.read())
+
+    def test_a_directory_at_the_env_path_is_nothing_to_merge_not_a_crash(self):
+        """O_NOFOLLOW does not cover this: a DIRECTORY opens fine and raises
+        IsADirectoryError on the first read, where the `os.path.isfile` guard
+        this replaced returned {}. A 500 on contrived filesystem state is
+        worse than a clean empty merge."""
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, ".env"))
+            with self.assertRaises(OSError):
+                # The rewrite itself cannot succeed over a directory -- that is
+                # fine and honest. What must NOT happen is _read blowing up
+                # first with a different, unrelated error.
+                setup_store.write({"ANTHROPIC_MODEL": "m"}, config_dir=d)
+            self.assertEqual(setup_store._read(os.path.join(d, ".env")), {})
+
+    def test_an_undecodable_file_is_nothing_to_merge(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, ".env")
+            with open(path, "wb") as f:
+                f.write(b"GEMINI_API_KEY=\xff\xfe\x00binary\n")
+            self.assertEqual(setup_store._read(path), {})
+            # And a write over it still lands, cleanly, discarding the garbage.
+            setup_store.write({"ANTHROPIC_MODEL": "m"}, config_dir=d)
+            with open(path) as f:
+                self.assertEqual(
+                    [ln for ln in f.read().splitlines() if not ln.startswith("#")],
+                    ["ANTHROPIC_MODEL=m"])
 
     def test_an_ordinary_existing_file_is_still_merged(self):
         # Proves the O_NOFOLLOW read did not turn every read into "no file".

@@ -451,9 +451,16 @@ def build_router(require_auth: Callable) -> APIRouter:
         # already rewritten. The corrupt value then loads at the next boot,
         # with file and process permanently diverged. Refuse it up front,
         # naming only the KEY: the value may be the secret.
+        #
+        # Scanned after a full `.strip()`, the SAME strip clean_value applies,
+        # so this refuses exactly the characters that would survive into the
+        # file and nothing else. Stripping only "\r\n" here made a value with
+        # a leading or trailing TAB -- an ordinary paste artifact -- a 400,
+        # where before this guard existed clean_value trimmed it and the save
+        # succeeded.
         ctrl = sorted(name for name, raw in body.values.items()
                       if any(ord(ch) < 0x20 or ord(ch) == 0x7F
-                             for ch in (raw or "").strip("\r\n")))
+                             for ch in (raw or "").strip()))
         if ctrl:
             raise HTTPException(
                 status_code=400,
