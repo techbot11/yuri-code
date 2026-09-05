@@ -6,17 +6,37 @@
 # self-signed cert, otherwise the wss terminal connection is silently blocked.
 #
 # SECURITY: this binds 0.0.0.0, so the backend is reachable from every device on
-# the LAN. You MUST set VC_AUTH_TOKEN in .env first (see .env.example) — without
-# it the backend refuses all non-loopback requests. Open the app on your devices
-# once as  https://<host>:3000/#vc_token=<the token>  to register the secret.
+# the LAN. You MUST have a VC_AUTH_TOKEN in your config file first — `yapcode up`
+# generates one, or set it by hand (see .env.example) — without it the backend
+# refuses all non-loopback requests. Open the app on your devices once as
+# https://<host>:3000/#vc_token=<the token>  to register the secret.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 # The backend doesn't auto-load VC_AUTH_TOKEN from a file (it's opt-in per run
-# mode). Network mode opts in: read it from the config file and export it. Look
-# in backend/.env, plus the config dir on Homebrew. An env value already set wins.
+# mode). Network mode opts in: read it from the config file and export it. An
+# env value already set wins.
+#
+# The candidate list and its ORDER mirror config.py's precedence chain exactly
+# -- the out-of-tree config dir (Homebrew only, YAPCODE_CONFIG_DIR), then
+# $YURI_HOME/config/.env, then the in-tree backend/.env -- so this script and
+# the backend never disagree about which file is in charge. The middle one is
+# the file `yapcode up`'s wizard now writes and the Setup screen saves to; it
+# used to be missing here, which meant a fresh clone reached the fail-closed
+# branch below and was pointed at a file nothing writes.
+_yuri_home="${YURI_HOME:-$HOME/Yuri}"
+_yuri_home="${_yuri_home/#\~/$HOME}"  # a literal `~/Yuri` arrives unexpanded
+# The file the wizard WRITES -- same rule as bin/yapcode's CONF_DIR and
+# setup_store.target_dir(). Only used to name a file in the error below; the
+# read loop still walks the whole precedence chain.
+if [ -n "${YAPCODE_CONFIG_DIR:-}" ]; then
+  _conf_env="$YAPCODE_CONFIG_DIR/.env"
+else
+  _conf_env="$_yuri_home/config/.env"
+fi
 if [ -z "${VC_AUTH_TOKEN:-}" ]; then
-  for _f in .env "${YAPCODE_CONFIG_DIR:+$YAPCODE_CONFIG_DIR/.env}"; do
+  for _f in "${YAPCODE_CONFIG_DIR:+$YAPCODE_CONFIG_DIR/.env}" \
+            "$_yuri_home/config/.env" .env; do
     [ -n "$_f" ] && [ -f "$_f" ] || continue
     _line="$(grep -E '^[[:space:]]*VC_AUTH_TOKEN=' "$_f" | tail -1)"
     if [ -n "$_line" ]; then
@@ -32,8 +52,9 @@ fi
 # LAN app. Require the secret to be configured before exposing the port.
 if [ -z "${VC_AUTH_TOKEN:-}" ]; then
   echo "ERROR: run-network.sh binds 0.0.0.0 but VC_AUTH_TOKEN is not set." >&2
-  echo "Set VC_AUTH_TOKEN in backend/.env (see .env.example) so remote/phone" >&2
-  echo "requests can authenticate; otherwise all non-loopback requests are refused." >&2
+  echo "Set VC_AUTH_TOKEN in $_conf_env (the file \`yapcode up\`'s" >&2
+  echo "wizard writes and \`yapcode config\` edits) so remote/phone requests can" >&2
+  echo "authenticate; otherwise all non-loopback requests are refused." >&2
   exit 1
 fi
 

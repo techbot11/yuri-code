@@ -31,6 +31,17 @@ class _Harness(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.addCleanup(lambda: os.environ.pop(PROBE, None))
         os.environ.pop(PROBE, None)
+        # ENV_SOURCES is module-level and the loader now READS it (the
+        # already-set-but-identical branch only stamps a key no
+        # higher-precedence file has claimed), so a leftover entry from a
+        # previous test would change the next test's outcome.
+        _sources = dict(config.ENV_SOURCES)
+
+        def _restore_sources():
+            config.ENV_SOURCES.clear()
+            config.ENV_SOURCES.update(_sources)
+        self.addCleanup(_restore_sources)
+        config.ENV_SOURCES.pop(PROBE, None)
 
     def plant(self, name: str, value: str) -> str:
         """Write a one-key .env and return its path."""
@@ -87,6 +98,58 @@ class Precedence(_Harness):
             self.plant("backend.env", "from-backend-env"),
             yuri_home_env=self.plant("home.env", "from-yuri-home-dir"))
         self.assertEqual(os.environ[PROBE], "from-config-dir")
+
+
+class ProvenanceOfAnAlreadyExportedValue(_Harness):
+    """Whose value is it when the environment and a file agree?
+
+    `yapcode up`'s load_env() exports every line of the config file before it
+    spawns the backend (bin/yapcode), so on the ordinary launcher path EVERY
+    configured key arrives already set -- to exactly the file's value. The
+    loader used to skip such a key entirely, leaving ENV_SOURCES unstamped and
+    `_source_of` falling through to "process environment". That made Setup's
+    shell-shadow warning (frontend/lib/setup.ts shadowedByShell) fire on every
+    single configured key, telling the user to unset a shell export that does
+    not exist -- while the saved value would in fact be re-read from that file
+    perfectly well."""
+
+    def test_a_value_identical_to_the_file_is_credited_to_the_file(self):
+        os.environ[PROBE] = "same-value"
+        self.load_in_config_order(None, self.plant("backend.env", "same-value"))
+        # The value is untouched -- precedence is unchanged, this is only about
+        # who gets the credit.
+        self.assertEqual(os.environ[PROBE], "same-value")
+        self.assertEqual(config._source_of(PROBE), "backend/.env")
+
+    def test_a_value_that_differs_from_every_file_is_the_process_environment(self):
+        # The case the warning was actually written for: something really is
+        # exported in the shell, and it really will win again after a restart.
+        os.environ[PROBE] = "from-the-shell"
+        self.load_in_config_order(self.plant("cfg.env", "from-config-dir"),
+                                  self.plant("backend.env", "from-backend-env"))
+        self.assertEqual(os.environ[PROBE], "from-the-shell")
+        self.assertEqual(config._source_of(PROBE), "process environment")
+
+    def test_the_highest_precedence_matching_file_gets_the_credit(self):
+        # Two files hold the same value the environment already has. The one
+        # config.py consults FIRST is the one that would supply it on a clean
+        # start, so it is the honest answer.
+        os.environ[PROBE] = "shared"
+        self.load_in_config_order(self.plant("cfg.env", "shared"),
+                                  self.plant("backend.env", "shared"),
+                                  yuri_home_env=self.plant("home.env", "shared"))
+        self.assertEqual(config._source_of(PROBE), "config dir")
+
+    def test_a_lower_precedence_file_cannot_steal_a_key_that_was_loaded(self):
+        # The guard must not let the already-set branch overwrite provenance a
+        # real load already recorded.
+        self.load_in_config_order(self.plant("cfg.env", "from-config-dir"),
+                                  self.plant("backend.env", "from-config-dir"))
+        self.assertEqual(os.environ[PROBE], "from-config-dir")
+        self.assertEqual(config._source_of(PROBE), "config dir")
+
+    def test_an_unset_key_still_reads_as_not_set(self):
+        self.assertEqual(config._source_of(PROBE), "not set")
 
 
 class CallSites(_Harness):

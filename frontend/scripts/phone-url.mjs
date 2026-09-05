@@ -1,20 +1,33 @@
 // Prints ready-to-open URLs (with the auth token) when network mode starts, so
 // you can open the app on your phone without hand-assembling the #vc_token URL.
-// Reads VC_AUTH_TOKEN from ../backend/.env and detects your LAN IP. Best-effort:
-// never fails the dev server (any error just prints a hint instead).
+// Reads VC_AUTH_TOKEN from the config file and detects your LAN IP.
+// Best-effort: never fails the dev server (any error just prints a hint).
 import { readFileSync } from "node:fs";
 import { networkInterfaces, homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-// Candidate config locations, in the order run-network.sh / the launcher resolve
-// them: the in-tree backend/.env (what run-network.sh reads), then the
-// out-of-tree config dir (Homebrew / YAPCODE_CONFIG_DIR / XDG).
-const cfgDir =
-  process.env.YAPCODE_CONFIG_DIR ||
-  join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "yapcode");
-const envPaths = [join(here, "..", "..", "backend", ".env"), join(cfgDir, ".env")];
+// Candidate config locations, in the SAME precedence order backend/config.py
+// and run-network.sh use: the out-of-tree config dir (Homebrew, via
+// YAPCODE_CONFIG_DIR), then $YURI_HOME/config/.env -- the file `yapcode up`'s
+// wizard writes and the Setup screen saves to -- then the in-tree
+// backend/.env. The middle one used to be missing here, so on a fresh clone
+// this printed "no token" while run-network.sh had one.
+const yuriHome = (process.env.YURI_HOME || join(homedir(), "Yuri")).replace(
+  /^~(?=$|\/)/,
+  homedir(),
+);
+const envPaths = [
+  process.env.YAPCODE_CONFIG_DIR && join(process.env.YAPCODE_CONFIG_DIR, ".env"),
+  join(yuriHome, "config", ".env"),
+  join(here, "..", "..", "backend", ".env"),
+].filter(Boolean);
+// Named for the hint below: the file the wizard actually WRITES (same rule as
+// bin/yapcode's CONF_DIR and setup_store.target_dir()).
+const writablePath = process.env.YAPCODE_CONFIG_DIR
+  ? join(process.env.YAPCODE_CONFIG_DIR, ".env")
+  : join(yuriHome, "config", ".env");
 
 function lanIP() {
   const addrs = [];
@@ -54,7 +67,7 @@ const t = token();
 const frag = t ? `/#vc_token=${t}` : "";
 const tokenNote = t
   ? ""
-  : "\n  ⚠ No VC_AUTH_TOKEN in backend/.env — network mode needs one (run-network.sh sets it up).";
+  : `\n  ⚠ No VC_AUTH_TOKEN in ${writablePath} — network mode needs one (\`yapcode up\` generates it).`;
 const bar = "─".repeat(64);
 
 process.stdout.write(

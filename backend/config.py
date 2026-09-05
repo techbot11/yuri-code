@@ -7,21 +7,28 @@ honored regardless of which module imports config first.
 
 Config location:
 
-  * backend/.env  — the SINGLE source of truth for a clone (gitignored). The
-                    setup wizard writes it, `yapcode config` edits it, and the
-                    backend loads it directly — so the wizard's key works no
-                    matter how the backend is started (run.sh, bare uvicorn,
-                    launcher).
+Loaded in this order, which IS the precedence order — the real process
+environment wins over all three, and each file only fills what the ones before
+it left unset:
+
   * ~/.config/yapcode/.env — used ONLY by a read-only install (Homebrew), whose
-                    wrapper sets YAPCODE_CONFIG_DIR because the Cellar can't host
-                    a writable backend/.env. A normal clone never consults it.
-  * $YURI_HOME/config/.env — where PUT /yuri/config (setup_store.write) puts
-                    what the Setup UI saves. Consulted UNCONDITIONALLY (unlike
-                    the Homebrew path above, gated on YAPCODE_CONFIG_DIR),
-                    because a plain clone never sets that variable: without
-                    this, a value saved from Setup would sit in a file nothing
-                    ever reads back, invisible again the moment the process
-                    restarts.
+                    wrapper sets YAPCODE_CONFIG_DIR because the Cellar can't
+                    host a writable in-tree file. A normal clone never
+                    consults it.
+  * $YURI_HOME/config/.env — the WRITABLE config file for a clone. Both writers
+                    target it: PUT /yuri/config (setup_store.write, what the
+                    Setup UI saves) and `bin/yapcode`, whose wizard writes it
+                    and whose `yapcode config` opens it. Consulted
+                    UNCONDITIONALLY, unlike the Homebrew path above, because a
+                    plain clone never sets YAPCODE_CONFIG_DIR: without this, a
+                    value saved from Setup would sit in a file nothing ever
+                    reads back.
+  * backend/.env  — read LAST, so it loses to both of the above (gitignored).
+                    No longer written by anything: it was the wizard's target
+                    before the Setup UI existed, and it is still loaded so an
+                    existing clone's file keeps working. `bin/yapcode` copies
+                    it into the writable location on first run. Nothing should
+                    tell a user to edit it — it may have no effect.
 
 VC_AUTH_TOKEN is never auto-loaded from any of these — it is opt-in per run mode
 (loopback-only `yapcode up`/run.sh stay tokenless; run-network.sh exports it
@@ -46,16 +53,17 @@ YURI_HOME: str = os.path.abspath(os.path.expanduser(os.getenv("YURI_HOME") or "~
 _BACKEND_ENV = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 
 # Out-of-tree config dir — consulted ONLY when YAPCODE_CONFIG_DIR is set (a
-# Homebrew install). A normal clone uses backend/.env alone.
+# Homebrew install). A normal clone leaves it unset and writes
+# _YURI_HOME_ENV below instead.
 _config_dir_raw = os.getenv("YAPCODE_CONFIG_DIR")
 _CONFIG_DIR = os.path.expanduser(_config_dir_raw) if _config_dir_raw else None
 _CONFIG_ENV = os.path.join(_CONFIG_DIR, ".env") if _CONFIG_DIR else None
 _CONFIG_ENV_DISPLAY = (
     _CONFIG_ENV.replace(os.path.expanduser("~"), "~", 1) if _CONFIG_ENV else None)
 
-# The Setup UI's own writable file (setup_store.write, PUT /yuri/config) for
-# the common case where YAPCODE_CONFIG_DIR is unset -- see the module
-# docstring's Config location section.
+# THE writable config file for a plain clone (YAPCODE_CONFIG_DIR unset):
+# setup_store.write / PUT /yuri/config save here, and bin/yapcode's wizard and
+# `yapcode config` target the same path -- see the module docstring.
 _YURI_HOME_ENV = os.path.join(YURI_HOME, "config", ".env")
 _YURI_HOME_ENV_DISPLAY = _YURI_HOME_ENV.replace(os.path.expanduser("~"), "~", 1)
 
@@ -75,7 +83,25 @@ try:  # dotenv is present in the venv; stay importable without it (e.g. in tests
             if _k == "VC_AUTH_TOKEN" or _v is None:
                 continue
             if not override and (os.getenv(_k) or "").strip():
-                continue  # fill-gaps: don't shadow an already-set value
+                # fill-gaps: don't shadow an already-set value. But if that
+                # value is IDENTICAL to this file's, the file IS where it came
+                # from, and leaving ENV_SOURCES unstamped makes _source_of
+                # fall through to "process environment" -- a lie with a
+                # visible consequence. `yapcode up`'s load_env() exports every
+                # line of the config file before spawning the backend, so
+                # without this every configured key reported "process
+                # environment" and Setup's shell-shadow warning
+                # (frontend/lib/setup.ts) fired on all of them, telling the
+                # user to unset a shell export that does not exist -- and the
+                # saved value would in fact be re-read from the file just
+                # fine. `_k not in ENV_SOURCES` so the precedence ORDER still
+                # decides which file gets the credit when several hold the
+                # same value: the first (highest-precedence) one wins, and a
+                # later file cannot claim a key an earlier one already
+                # explained.
+                if os.environ.get(_k) == _v and _k not in ENV_SOURCES:
+                    ENV_SOURCES[_k] = label
+                continue
             os.environ[_k] = _v
             ENV_SOURCES[_k] = label
 
