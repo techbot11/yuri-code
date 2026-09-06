@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  blocking, canSave, effectLabel, effectsSentence, fieldPlaceholder, fieldValue,
-  fixAction, gateOpen, pendingChanges, shadowedByShell, shellShadowWarning,
-  SHELL_SOURCE, type DoctorCheck, type ManagedKey,
+  blocking, canSave, DISCARD_UNREADABLE_CONFIRM, DISCARD_UNREADABLE_LABEL,
+  effectLabel, effectsSentence, fieldPlaceholder, fieldValue,
+  fixAction, gateOpen, pendingChanges, saveTransport, secretSaveBlockedReason,
+  shadowedByShell, shellShadowWarning, SHELL_SOURCE, UNREADABLE_STORE_BANNER,
+  type DoctorCheck, type ManagedKey,
 } from "./setup.ts";
 
 const check = (over: Partial<DoctorCheck> = {}): DoctorCheck => ({
@@ -187,6 +189,90 @@ test("an UNSET key is never flagged, whatever its source says", () => {
   // shadow — a warning here would land on every empty field.
   assert.equal(shadowedByShell(key({ set: false, source: SHELL_SOURCE })), false);
   assert.equal(shellShadowWarning(key({ set: false, source: SHELL_SOURCE })), "");
+});
+
+// --- and the one case where that warning was itself the lie ----------------
+
+test("a SECRET the Keychain will carry gets NO shell warning", () => {
+  // The bug: both halves of the sentence are false for a secret in the desktop
+  // app. The save does NOT take effect straight away (it goes to the Keychain
+  // and nowhere else, which is why save() forces the "restart" effect), and
+  // the exported value does NOT win again (servers.ts merges credentialsEnv()
+  // last, over the shell env, on purpose). So the user was told to unset a
+  // variable their other tools may need, to fix a problem that does not exist.
+  //
+  // Asserted as an ABSENCE deliberately: this is the fourth bug on this branch
+  // of exactly this shape -- a UI string asserting something untrue -- and a
+  // test that only checks the cases that already read correctly cannot catch
+  // one. If the rule regresses to warning here, this line fails.
+  const k = key({ secret: true, set: true, source: SHELL_SOURCE, hint: "…9f31" });
+  assert.equal(saveTransport(k, true), "keychain");
+  assert.equal(shellShadowWarning(k, true), "");
+});
+
+test("the shell warning stands wherever HTTP and the .env file are the store", () => {
+  // The other three of the four combinations. Each one really does go over
+  // PUT /yuri/config into the .env file that the shell outranks.
+  const nonSecretWithBridge = key({ name: "ANTHROPIC_MODEL", secret: false, set: true,
+                                    source: SHELL_SOURCE, hint: "claude-opus-5" });
+  const nonSecretNoBridge = { ...nonSecretWithBridge };
+  const secretNoBridge = key({ secret: true, set: true, source: SHELL_SOURCE, hint: "…9f31" });
+
+  for (const [k, hasBridge, why] of [
+    [nonSecretWithBridge, true, "a non-secret in the desktop app still goes over HTTP"],
+    [nonSecretNoBridge, false, "a non-secret in a browser tab, likewise"],
+    [secretNoBridge, false, "a secret in a browser tab has no Keychain to go to"],
+  ] as [ManagedKey, boolean, string][]) {
+    assert.equal(saveTransport(k, hasBridge), "http", why);
+    const warning = shellShadowWarning(k, hasBridge);
+    assert.match(warning, new RegExp(k.name), why);
+    assert.match(warning, /next time Yuri starts/, why);
+  }
+});
+
+test("the default is the browser's reading, so an un-passed bridge cannot silence it", () => {
+  // shellShadowWarning(k) with no second argument must behave as the HTTP
+  // transport: a call site that forgot to say must not accidentally suppress a
+  // warning that is true.
+  const k = key({ secret: true, set: true, source: SHELL_SOURCE, hint: "…9f31" });
+  assert.match(shellShadowWarning(k), /next time Yuri starts/);
+});
+
+// --- a Keychain store this build cannot read (spike R1) --------------------
+
+test("the unreadable-store banner promises what the code will actually do", () => {
+  // It used to say "Re-enter them below", which main/credentials.ts refuses
+  // outright -- the save threw, and its real remedy (delete credentials.enc)
+  // was named nowhere in the UI.
+  assert.match(UNREADABLE_STORE_BANNER, /cannot decrypt/i, "the true fact");
+  assert.match(UNREADABLE_STORE_BANNER, /will not save/i, "the refusal, said up front");
+  assert.match(UNREADABLE_STORE_BANNER, /discard/i, "the way through");
+  assert.doesNotMatch(UNREADABLE_STORE_BANNER, /re-enter them below/i,
+                      "the instruction the code refuses");
+});
+
+test("the discard confirmation says what is lost, not just yes/no", () => {
+  assert.match(DISCARD_UNREADABLE_CONFIRM, /permanently/i);
+  assert.match(DISCARD_UNREADABLE_CONFIRM, /deleted/i);
+});
+
+test("a blocked secret save names the control that unblocks it", () => {
+  // Reachability is the requirement: no path may end in an error whose remedy
+  // is not an action on this screen.
+  const reason = secretSaveBlockedReason(true, ["GEMINI_API_KEY", "OPENAI_API_KEY"]);
+  assert.match(reason, /GEMINI_API_KEY/);
+  assert.match(reason, /OPENAI_API_KEY/);
+  assert.ok(reason.includes(DISCARD_UNREADABLE_LABEL),
+            "the reason must name the button, verbatim");
+});
+
+test("nothing is blocked when the store reads fine, or when no secret is pending", () => {
+  // A non-secret still saves over HTTP with an unreadable Keychain store --
+  // that store has nothing to do with the .env file -- so blocking the whole
+  // Save button here would be its own lie.
+  assert.equal(secretSaveBlockedReason(false, ["GEMINI_API_KEY"]), "");
+  assert.equal(secretSaveBlockedReason(true, []), "");
+  assert.equal(secretSaveBlockedReason(false, []), "");
 });
 
 // --- what a field shows when you come back --------------------------------

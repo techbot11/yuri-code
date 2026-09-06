@@ -11,10 +11,12 @@ import { useCallback, useEffect, useState } from "react";
 import { ApiError, yget, yput } from "@/lib/api";
 import { agentLine, agentVisual, anyAgentAvailable, type Agent } from "@/lib/agents";
 import { useYuri } from "@/components/VoiceProvider";
-import { restartImpact } from "@/lib/restart";
+import { restartImpact, restartRanNote } from "@/lib/restart";
 import {
-  blocking, canSave, effectsSentence, fieldPlaceholder, fieldValue, fixAction,
-  pendingChanges, shellShadowWarning,
+  blocking, canSave, DISCARD_UNREADABLE_CONFIRM, DISCARD_UNREADABLE_LABEL,
+  effectsSentence, fieldPlaceholder, fieldValue, fixAction,
+  pendingChanges, secretSaveBlockedReason, shellShadowWarning,
+  UNREADABLE_STORE_BANNER,
   type DoctorCheck, type Effect, type ManagedKey,
 } from "@/lib/setup";
 import { ViewError } from "./ViewError";
@@ -29,6 +31,13 @@ type YuriCredentialsBridge = {
   write: (updates: Record<string, string>) =>
     Promise<{ ok: true; written: string[] } | { ok: false; error: string }>;
   names: () => Promise<{ names: string[]; unreadable: boolean }>;
+  /** Delete a store this build cannot decrypt, so a save can proceed. The one
+   *  way past desktop/main/credentials.ts's refusal to write over an
+   *  unreadable store -- see the banner below. Optional: an older shell
+   *  exposes no such channel, and the UI must not offer a button that would
+   *  reject. */
+  discardUnreadable?: () =>
+    Promise<{ ok: true; discarded: boolean } | { ok: false; error: string }>;
 };
 
 /** Same pattern as SetupGate's yuriBoot() / VoiceProvider's yuriTray read: a
@@ -47,7 +56,13 @@ function yuriCredentials(): YuriCredentialsBridge | undefined {
 // GUIDE.md's "a control that cannot work is not rendered" is why the button
 // itself is gated on this rather than merely disabled.
 type YuriBootBridge = {
-  restartBackend: () => Promise<{ ok: true } | { ok: false; error: string }>;
+  /** `ran` says whether a cycle actually happened: runBootCycle() declines to
+   *  overlap two of them, and a declined request is neither an error nor a
+   *  restart. Optional so an older shell that answers `{ok: true}` alone reads
+   *  as "unknown" rather than as "declined" (lib/restart.ts's
+   *  restartRanNote). */
+  restartBackend: () =>
+    Promise<{ ok: true; ran?: boolean } | { ok: false; error: string }>;
 };
 
 function yuriBoot(): YuriBootBridge | undefined {
@@ -124,6 +139,20 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
   // set", because those are different facts and only one of them means
   // "your keys are gone, re-enter them".
   const [credentialsUnreadable, setCredentialsUnreadable] = useState(false);
+  // Whether the desktop credential bridge is there, which decides which
+  // TRANSPORT a secret's save takes -- and so whether the shell-shadow
+  // warning below is true (lib/setup.ts's saveTransport). Read after mount,
+  // not during render: window.yuriCredentials does not exist on the server,
+  // and a field whose warning differed between the two would
+  // hydration-mismatch.
+  const [hasCredentialBridge, setHasCredentialBridge] = useState(false);
+  // The two-step discard of a store this build cannot decrypt. Armed by the
+  // first click, performed by the second: it deletes keys for good, and a
+  // single click on a button sitting inside a red banner is too easy to make
+  // by accident.
+  const [discardArmed, setDiscardArmed] = useState(false);
+  const [discarding, setDiscarding] = useState(false);
+  const [discardError, setDiscardError] = useState("");
   // In flight while runBootCycle(true) drains and respawns both children --
   // several seconds during which the backend is unreachable. Disabling the
   // button on this (rather than trusting one click to be the only one) is
@@ -131,6 +160,11 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
   // own `booting` guard would otherwise just silently swallow.
   const [restarting, setRestarting] = useState(false);
   const [restartError, setRestartError] = useState("");
+  // What to say when the shell ACCEPTED the request and then declined to act
+  // on it -- runBootCycle()'s `booting` guard swallowing an overlapping cycle.
+  // Not an error (nothing broke) and not a success (nothing restarted), and
+  // it used to be reported as the latter.
+  const [restartNote, setRestartNote] = useState("");
 
   // Same source the tray uses (VoiceProvider -> lib/trayState.ts), so this
   // screen and the tray can never disagree about what "running" means.
@@ -171,6 +205,8 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
     void load();
   }, [load]);
 
+  useEffect(() => { setHasCredentialBridge(yuriCredentials() !== undefined); }, []);
+
   const save = async () => {
     if (!keys) return;
     const names = pendingChanges(forSaveDecisions(keys, credentialNames), draft);
@@ -183,6 +219,22 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
     const bySecret = new Map(keys.map((k) => [k.name, k.secret]));
     const secretNames = bridge ? names.filter((n) => bySecret.get(n)) : [];
     const httpNames = names.filter((n) => !secretNames.includes(n));
+
+    // Said BEFORE the write, and it names the control that unblocks it.
+    // writeCredentials() refuses to merge into a store it cannot decrypt --
+    // rightly, since that would silently discard whatever the store held --
+    // and this screen used to walk the user straight into that refusal and
+    // then show its raw message, whose real remedy (delete credentials.enc
+    // from Application Support) was named nowhere in the UI. Now the remedy
+    // is the button on the banner above, and this sentence points at it. The
+    // main process's refusal stays exactly as it was: this is the earlier,
+    // kinder guard, not a replacement for it.
+    const blockedReason = secretSaveBlockedReason(credentialsUnreadable, secretNames);
+    if (blockedReason) {
+      setSaveError(blockedReason);
+      setSaved("");
+      return;
+    }
 
     setBusy(true);
     setSaveError("");
@@ -234,6 +286,43 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
     }
   };
 
+  /** Throw away a Keychain store this build cannot decrypt.
+   *
+   *  The way out of the dead end: the main process refuses to write over an
+   *  unreadable store, so without this the user's only remedy was to find
+   *  credentials.enc in Application Support and delete it by hand -- named
+   *  nowhere on this screen. Deliberately its own action rather than a flag on
+   *  the save, and armed by a first click before a second one performs it, so
+   *  discarding keys can never be a side effect of saving one.
+   *
+   *  The main process decides WHETHER: it refuses a readable store, and
+   *  refuses one that is merely unreadable-this-run because the Keychain is
+   *  unavailable (a locked login keychain comes back; deleting then would lose
+   *  recoverable keys). Both refusals arrive here as `error` and are shown. */
+  const doDiscardUnreadable = async () => {
+    const discard = yuriCredentials()?.discardUnreadable;
+    if (!discard || !credentialsUnreadable) return;
+    setDiscarding(true);
+    setDiscardError("");
+    try {
+      const res = await discard();
+      if (!res.ok) throw new Error(res.error);
+      setDiscardArmed(false);
+      // Clear the save error too: if it was the blocked-secret sentence, the
+      // thing it complained about no longer exists, and leaving it up would
+      // send the user looking for a button that is gone.
+      setSaveError("");
+      // Re-read rather than assuming: load() asks the bridge again, which is
+      // what turns the banner off -- and it is the same re-read save() does,
+      // for the same reason.
+      await load();
+    } catch (e) {
+      setDiscardError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDiscarding(false);
+    }
+  };
+
   // The offer restartImpact()'s refusal protects: only reachable at all when
   // the bridge exists (the button below is not rendered otherwise), and
   // restartImpact.safe is re-checked here too, not just in the disabled
@@ -246,9 +335,17 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
     if (!bridge || !impact.safe) return;
     setRestarting(true);
     setRestartError("");
+    setRestartNote("");
     try {
       const res = await bridge.restartBackend();
       if (!res.ok) throw new Error(res.error);
+      // `ok` alone does not mean a restart happened: runBootCycle() returns
+      // ran:false when its `booting` guard declined an overlapping cycle,
+      // which drains nothing and respawns nothing. Reported as its own fact,
+      // because the alternative (what this used to do) is a screen that says
+      // a restart succeeded when the shell never started one -- and since
+      // nothing navigated, the user is still sitting here reading it.
+      setRestartNote(restartRanNote(res.ran));
       // A successful restart navigates this very window to the fresh
       // frontend it just spawned (desktop/main/index.ts's boot()), which
       // tears down this whole page -- so nothing below normally runs. It
@@ -302,6 +399,11 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
   const liveSessions = sessions.length;
   const impact = restartImpact(runningMissions, liveSessions);
   const bootBridge = yuriBoot();
+  // The discard control is rendered only where it can actually run. Read
+  // during render like bootBridge above (and gated on credentialsUnreadable,
+  // which is false until the bridge has answered, so this can never render on
+  // the server).
+  const discardBridge = yuriCredentials()?.discardUnreadable;
 
   return (
     <section className="setup">
@@ -382,9 +484,43 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
         // build wrote. Silence here would look exactly like a clean first
         // run, and the user would find out only when a voice call failed
         // for a reason this screen could have named.
+        //
+        // The text used to end "Re-enter them below" -- the one thing
+        // main/credentials.ts refuses, since a merge from an unreadable store
+        // would silently discard whatever it held. It now says what will
+        // actually happen (lib/setup.ts's UNREADABLE_STORE_BANNER, where a
+        // test can read it) and carries the action that makes the save
+        // possible.
         <div className="mcp-configerr">
-          Your saved API keys could not be read from the Keychain on this machine
-          (this can happen after the app is rebuilt). Re-enter them below.
+          {UNREADABLE_STORE_BANNER}
+          {discardBridge ? (
+            <div className="mcp-actions" style={{ marginTop: 10 }}>
+              <button className="txtoggle"
+                      disabled={discarding}
+                      onClick={() => {
+                        if (!discardArmed) { setDiscardArmed(true); return; }
+                        void doDiscardUnreadable();
+                      }}>
+                {discarding ? "Discarding…"
+                  : discardArmed ? DISCARD_UNREADABLE_CONFIRM : DISCARD_UNREADABLE_LABEL}
+              </button>
+              {discardArmed && !discarding && (
+                <button className="txtoggle" onClick={() => setDiscardArmed(false)}>
+                  Keep them
+                </button>
+              )}
+            </div>
+          ) : (
+            // No bridge for it (an older shell, or a plain browser tab that
+            // could not have an unreadable store in the first place): say
+            // where the file is rather than offering a button that cannot
+            // work. This is the remedy that used to be nowhere.
+            <div style={{ marginTop: 8 }}>
+              Delete <code>credentials.enc</code> from Yuri OS&rsquo;s Application Support
+              folder, then start her again.
+            </div>
+          )}
+          {discardError && <pre className="mcp-err">{discardError}</pre>}
         </div>
       )}
 
@@ -393,7 +529,14 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
           // A value exported in the user's shell beats every file Setup can
           // write, so a save here works now and reverts at the next start.
           // Said BEFORE the save, on the field.
-          const shadow = shellShadowWarning(k);
+          // Passed the transport, because the warning is only true for one of
+          // them: a secret the Keychain will carry neither takes effect
+          // straight away nor loses to the shell export at the next start
+          // (servers.ts merges credentialsEnv() last, deliberately), so
+          // saying so would send the user to unset a variable their other
+          // tools may need for a problem that does not exist. See
+          // lib/setup.ts's shellShadowWarning.
+          const shadow = shellShadowWarning(k, hasCredentialBridge);
           // Stored in the Keychain this session, but the running backend
           // child was spawned before that write happened -- its environment
           // is fixed at spawn time (desktop/main/servers.ts), so `k.set`
@@ -451,6 +594,10 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
         <div className="setup-restart">
           <div className="mcp-blurb">{impact.warning || "Nothing is running."}</div>
           {restartError && <pre className="mcp-err">{restartError}</pre>}
+          {/* A request the shell declined to act on: not an error, and not a
+              restart either. Said out loud, because nothing navigated and
+              this page is still the one the user is looking at. */}
+          {restartNote && <em className="setup-saved">{restartNote}</em>}
           <button className="txtoggle primary"
                   disabled={restarting || !impact.safe}
                   onClick={() => void doRestart()}>

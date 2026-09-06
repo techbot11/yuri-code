@@ -158,14 +158,100 @@ export function shadowedByShell(key: ManagedKey): boolean {
   return key.set && key.source === SHELL_SOURCE;
 }
 
+/** Which of the two stores a save to this key will land in.
+ *
+ *  The same fact SetupPanel's save() computes when it splits `names` into
+ *  `secretNames` and `httpNames`: a secret goes renderer -> IPC -> safeStorage
+ *  when the desktop bridge is there, and everything else goes over HTTP into
+ *  the .env file. Named here, once, because two rules now depend on it and a
+ *  second copy of the condition is a second thing to get out of step. */
+export type SaveTransport = "keychain" | "http";
+
+export function saveTransport(key: ManagedKey, hasBridge: boolean): SaveTransport {
+  return key.secret && hasBridge ? "keychain" : "http";
+}
+
 /** The warning to show on that field, or "" for no warning. Plain words: the
  *  reader is someone who exported a variable in a terminal, not someone who
- *  knows what "precedence" means here. */
-export function shellShadowWarning(key: ManagedKey): string {
+ *  knows what "precedence" means here.
+ *
+ *  Silent for a key the KEYCHAIN will carry, because both halves of the
+ *  sentence are false there and it was told to every desktop user who had ever
+ *  exported an API key:
+ *
+ *    - "changes it straight away" -- it does not. The value goes to the
+ *      Keychain and nowhere else, which is exactly why save() pushes
+ *      "restart" into its own effects regardless of the key's declared one:
+ *      the already-spawned backend's environment is fixed at spawn time.
+ *    - "that exported value wins again the next time Yuri starts" -- it does
+ *      not. desktop/main/servers.ts merges credentialsEnv() LAST, over the
+ *      shell env, deliberately (spec §6.3), and after that boot the key's
+ *      `source` reads "the app's keychain" and this warning stops firing on
+ *      its own.
+ *
+ *  So on the desktop it asked the user to unset a variable their other tools
+ *  may need, to fix a problem that does not exist. It stays for the HTTP
+ *  transport, where the shell genuinely does outrank the .env file Setup
+ *  writes -- which is every non-secret, and every key in a plain browser tab. */
+export function shellShadowWarning(key: ManagedKey, hasBridge = false): string {
   if (!shadowedByShell(key)) return "";
+  if (saveTransport(key, hasBridge) === "keychain") return "";
   return `${key.name} is set in the shell Yuri was started from. Saving here `
     + `changes it straight away, but that exported value wins again the next `
     + `time Yuri starts — unset it in your shell to make this stick.`;
+}
+
+// --- a Keychain store this build cannot read -------------------------------
+//
+// Spike R1: an unsigned app's Keychain access is gated on its own code
+// identity, so a rebuilt bundle routinely cannot decrypt the store an earlier
+// build wrote -- and electron-builder.yml accepts a re-prompt on every build,
+// so this is the EXPECTED state after a rebuild rather than an exotic one.
+//
+// desktop/main/credentials.ts refuses to write over a store it cannot read,
+// which is the right instinct: a merge that started from an unreadable store
+// would silently discard whatever it held. But the banner used to say
+// "Re-enter them below", which is precisely the one thing that refusal
+// forbids -- so the user typed a key, saved, and got an error whose actual
+// remedy (delete credentials.enc from Application Support) was named nowhere.
+//
+// The copy lives here rather than in JSX because every string that has been
+// wrong on this branch has been wrong inside JSX, where no test can reach it.
+
+/** The label on the control that clears an unreadable store. Referenced by
+ *  the blocked-save reason below, so the remedy the error names and the
+ *  button that performs it cannot drift apart. */
+export const DISCARD_UNREADABLE_LABEL = "Discard the unreadable keys";
+
+/** The banner. Says what is true (they exist, they cannot be read here, and
+ *  Yuri will not write over them) and what to do about it -- never "re-enter
+ *  them below", which the main process refuses. */
+export const UNREADABLE_STORE_BANNER =
+  "Your saved API keys are still on this machine, but this build of Yuri cannot "
+  + "decrypt them — the expected result of rebuilding the app, whose Keychain access "
+  + "is tied to its own identity. She will not save a new key over them, because that "
+  + "would silently throw away whatever they held. Discard them first, then enter your "
+  + "keys again.";
+
+/** The confirmation, shown in place of the label once the control is armed.
+ *  Explicit about the loss, because it is not recoverable. */
+export const DISCARD_UNREADABLE_CONFIRM =
+  "Discard them permanently — the keys Yuri cannot read are deleted, and you enter "
+  + "yours again below";
+
+/** Why a secret cannot be saved right now, or "" when it can.
+ *
+ *  Said BEFORE the save, and it names the control that unblocks it: the main
+ *  process's refusal is the last line of defence, not the user's first news of
+ *  the problem. Only ever about secrets -- a non-secret goes over HTTP into
+ *  the .env file and has nothing to do with the Keychain store. */
+export function secretSaveBlockedReason(
+  unreadable: boolean, pendingSecretNames: string[],
+): string {
+  if (!unreadable || pendingSecretNames.length === 0) return "";
+  return `${pendingSecretNames.join(", ")} cannot be saved while the old Keychain store `
+    + `is unreadable — saving would discard whatever it held. Use “`
+    + `${DISCARD_UNREADABLE_LABEL}” above first, then save.`;
 }
 
 
