@@ -6,6 +6,7 @@
 import { useEffect, useState } from "react";
 import { useYuri } from "@/components/VoiceProvider";
 import { failure } from "@/lib/voiceStatus";
+import { micSettingsOpener, offersMicSettings } from "@/lib/mic.ts";
 import { orbCaption } from "@/lib/voiceui.ts";
 import { NARRATION_MODES } from "@/lib/narration.ts";
 
@@ -30,6 +31,17 @@ export function TopBar() {
 
   const caption = orbCaption(connected, muted, vstate);
   const speaking = vstate === "speaking";
+  const failed = failure(status);
+
+  // Resolved after mount, never during render: window.yuriBoot does not exist
+  // on the server, and a control rendered from it during SSR would
+  // hydration-mismatch the way the clock above would. Undefined in a browser
+  // tab, which is why the button is not rendered there at all -- there is
+  // nothing it could do (GUIDE.md: a control that cannot work is not
+  // rendered), and the browser's own message says "address bar" instead.
+  const [openMicSettings, setOpenMicSettings] =
+    useState<(() => void) | undefined>(undefined);
+  useEffect(() => { setOpenMicSettings(micSettingsOpener()); }, []);
 
   return (
     <div className="top">
@@ -51,8 +63,19 @@ export function TopBar() {
             "Failed: ..." into state that no component rendered, so the user
             saw neither "connected" nor a reason. Shown beside the pill, which
             is where they just clicked. */}
-        {!connected && failure(status) && (
-          <span className="vfail" role="status">{failure(status)}</span>
+        {!connected && failed && (
+          <span className="vfail" role="status">{failed}</span>
+        )}
+        {/* A denied microphone is fixed in System Settings, not here -- and
+            in the packaged app the shell can open that pane itself (Task 4's
+            mic:settings channel, until now reachable only from the boot
+            splash, which is hidden on a warm start). Shown only for the
+            message that names that pane (lib/mic.ts's offersMicSettings), so
+            it never appears beside a failure it cannot fix. */}
+        {!connected && offersMicSettings(failed) && openMicSettings && (
+          <button className="vmute" onClick={() => openMicSettings()}>
+            Open Microphone settings
+          </button>
         )}
         {connected && (
           <button

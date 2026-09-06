@@ -1,15 +1,50 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { MIC_TIMED_OUT, MIC_TIMEOUT_MS, micErrorMessage } from "./mic.ts";
+import {
+  MIC_SETTINGS_SENTENCE, MIC_TIMED_OUT, MIC_TIMEOUT_MS, micErrorMessage,
+  micSettingsOpener, offersMicSettings,
+} from "./mic.ts";
 
 const err = (name: string, message = "") => Object.assign(new Error(message), { name });
 
-test("a refused permission says how to un-refuse it", () => {
+test("a refused permission says how to un-refuse it — in a BROWSER", () => {
   for (const name of ["NotAllowedError", "SecurityError"]) {
-    const msg = micErrorMessage(err(name));
+    const msg = micErrorMessage(err(name), false);
     assert.match(msg, /refused/i);
     assert.match(msg, /address bar/i, `${name} must say where to fix it`);
   }
+});
+
+test("a refused permission in the PACKAGED app points at System Settings", () => {
+  // There is no address bar in the desktop shell -- no browser chrome at all
+  // -- and macOS is what refused, so the browser instruction was unfollowable
+  // for exactly the users most likely to hit this (an unsigned build loses its
+  // grant on every rebuild, spike R1). Asserted as an absence too: sending a
+  // packaged user to a browser control they do not have is the bug.
+  for (const name of ["NotAllowedError", "SecurityError"]) {
+    const msg = micErrorMessage(err(name), true);
+    assert.match(msg, /refused/i, name);
+    assert.doesNotMatch(msg, /address bar|browser/i, `${name}: there is no browser here`);
+    assert.ok(msg.includes(MIC_SETTINGS_SENTENCE), `${name}: names where it is really fixed`);
+    assert.ok(offersMicSettings(msg),
+              `${name}: the surface showing this can offer to open that pane`);
+  }
+});
+
+test("only the message that names the pane offers to open it", () => {
+  // The offer follows the text, so a control cannot appear beside a message
+  // whose fix is something else entirely.
+  assert.equal(offersMicSettings(micErrorMessage(err("NotFoundError"), true)), false);
+  assert.equal(offersMicSettings(micErrorMessage(err("NotAllowedError"), false)), false);
+  assert.equal(offersMicSettings(""), false);
+});
+
+test("with no window at all there is no bridge, and the browser text stands", () => {
+  // node --test has no `window`: the default argument must resolve to "not the
+  // desktop" rather than throwing, since this is the same code path a plain
+  // browser tab takes.
+  assert.equal(micSettingsOpener(), undefined);
+  assert.match(micErrorMessage(err("NotAllowedError")), /address bar/i);
 });
 
 test("a device already in use names the likely culprit", () => {
