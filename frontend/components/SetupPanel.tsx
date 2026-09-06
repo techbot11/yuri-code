@@ -9,7 +9,7 @@
 // leaving it empty changes nothing.
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, yget, yput } from "@/lib/api";
-import { agentLine, anyAgentAvailable, type Agent } from "@/lib/agents";
+import { agentLine, agentVisual, anyAgentAvailable, type Agent } from "@/lib/agents";
 import {
   blocking, canSave, effectsSentence, fieldPlaceholder, fieldValue, fixAction,
   pendingChanges, shellShadowWarning,
@@ -185,7 +185,7 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
           ) : null}
           <ul>
             {agents.map((a) => (
-              <li key={a.name} data-available={a.available && a.enabled}>
+              <li key={a.name} data-state={agentVisual(a)}>
                 <span className="agent-label">{a.label}</span>
                 <span className="agent-detail">{agentLine(a)}</span>
               </li>

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { agentLine, anyAgentAvailable, type Agent } from "./agents.ts";
+import { agentLine, agentVisual, anyAgentAvailable, type Agent } from "./agents.ts";
 
 function agent(over: Partial<Agent> = {}): Agent {
   return { name: "claude-code", label: "Claude Code", available: true,
@@ -39,4 +39,25 @@ test("one working agent is enough even when another is offline", () => {
     agent({ name: "opencode", available: false }),
     agent(),
   ]), true);
+});
+
+// agentVisual: a visual axis distinct from agentLine's wording. Collapsing
+// available-but-disabled into the same treatment as not-installed (a boolean
+// `available && enabled`) is exactly the bug this function exists to prevent.
+test("an available, enabled agent is connected", () => {
+  assert.equal(agentVisual(agent()), "connected");
+});
+
+test("a missing agent is offline", () => {
+  assert.equal(agentVisual(agent({ available: false })), "offline");
+});
+
+test("an installed but not-enabled agent is disabled -- distinct from offline", () => {
+  assert.equal(agentVisual(agent({ available: true, enabled: false })), "disabled");
+});
+
+test("availability wins over enablement: not installed reads offline even if enabled is true", () => {
+  // enabled=true with available=false shouldn't happen in practice (nothing
+  // to enable), but the precedence must still be unambiguous.
+  assert.equal(agentVisual(agent({ available: false, enabled: true })), "offline");
 });

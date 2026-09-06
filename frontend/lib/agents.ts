@@ -29,3 +29,16 @@ export function agentLine(a: Agent): string {
 export function anyAgentAvailable(list: Agent[]): boolean {
   return list.some((a) => a.available && a.enabled);
 }
+
+/** The three states as a visual axis, kept separate from `agentLine`'s
+ *  wording. Collapsing "installed but not turned on" into a boolean
+ *  (available && enabled) gives it the exact same styling as "not
+ *  installed" -- only the text would differ, which hides a one-setting fix
+ *  behind the same dimmed treatment as an ordinary absence. */
+export type AgentVisual = "connected" | "offline" | "disabled";
+
+export function agentVisual(a: Agent): AgentVisual {
+  if (!a.available) return "offline";
+  if (!a.enabled) return "disabled";
+  return "connected";
+}

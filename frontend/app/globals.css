@@ -4979,6 +4979,7 @@ a.setup-fix:hover {
    gap: 12px;
    padding: 7px 10px;
    border: 1px solid var(--line);
+   border-left-width: 3px;
    border-radius: 8px;
 }
 
@@ -4997,5 +4998,19 @@ a.setup-fix:hover {
    overflow-wrap: anywhere;
 }
 
-.setup-agents li[data-available="false"] .agent-detail { color: var(--dim); }
-.setup-agents li[data-available="true"]  .agent-detail { color: var(--ink); }
+/* Three genuinely distinct states, not two -- collapsing "installed but not
+   turned on" into the same dimmed treatment as "not installed" hides a
+   one-setting fix behind the same recede as an ordinary absence.
+   connected: reads at full ink. offline: recedes, nothing is wrong.
+   disabled: a third thing, not a shade between the other two -- she has it,
+   it is just switched off, which is actionable in a way absence is not. */
+.setup-agents li[data-state="connected"] .agent-detail { color: var(--ink); }
+.setup-agents li[data-state="offline"]   .agent-detail { color: var(--dim); }
+.setup-agents li[data-state="disabled"]  .agent-detail { color: var(--warn); }
+.setup-agents li[data-state="disabled"]  .agent-label  { color: var(--warn); }
+
+/* The row's left-edge marker: a third, non-neutral border only for disabled
+   ("you have this, it is switched off" is actionable in a way "you do not
+   have this" is not) -- connected and offline share the neutral --line so
+   only the state that calls for action gets flagged at the row's edge. */
+.setup-agents li[data-state="disabled"] { border-left-color: var(--warn); }
