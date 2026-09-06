@@ -17,7 +17,7 @@ import { mergeEnv, withFallbackPath, type Env } from "../lib/env";
 import { MIC_SETTINGS_URL, normalizeMicStatus, type MicStatus } from "../lib/mic";
 import { externalOpenScheme, isAppUrl } from "../lib/urls";
 import { portsFromEnv } from "../lib/ports";
-import { readCredentialsDetailed, writeCredentials } from "./credentials";
+import { discardCredentials, readCredentialsDetailed, writeCredentials } from "./credentials";
 import { startServers, stopServers } from "./servers";
 import { homeDir, probeLoginEnv } from "./shellEnv";
 import { createTray, setTrayState } from "./tray";
@@ -273,17 +273,33 @@ async function boot(): Promise<void> {
   ).catch((err) => {
     console.error("[yuri] startServers() rejected:", err instanceof Error ? err.message : err);
     // Not an ordinary BootEvent (something in startServers() itself threw,
-    // rather than a child failing cleanly) -- but frontendSettled must still
-    // resolve, or a bug here would hang boot() forever with the window
-    // showing nothing. Frontend, not backend: nothing can show without it,
-    // regardless of which child startServers() was working on when it threw.
+    // rather than a child failing cleanly). The `finally` below is what
+    // actually settles the wait; this only supplies the page's text, since a
+    // throw here means no child ever reported one.
+    frontendDetail ||= "the desktop shell failed to start it";
+  }).finally(() => {
+    // THE structural guarantee: the wait cannot outlive startServers().
+    //
+    // Not a second timeout -- it fires on that function having completed, so
+    // there is no clock to tune and no window in which "still starting" and
+    // "will never start" look alike. Every path that leaves the frontend
+    // unreported by the time startServers() settles ends here: a refusal that
+    // spawned nothing (a busy port), a future early return, a throw inside
+    // the function itself. Before this existed, the busy-BACKEND-port refusal
+    // reached exactly that state and boot() never returned -- the window
+    // stuck on the "Starting Yuri…" splash with no Retry and no Quit, and
+    // `booting` held forever so no retry or restart could run again.
+    //
+    // servers.ts now reports both children on that refusal, which is what
+    // gives the page a detail worth reading; this is the backstop that makes
+    // the hang impossible rather than merely absent from today's code.
     if (state.frontend === "starting") {
-      state = applyBootEvent(state, {
-        type: "failed", child: "frontend", detail: "the desktop shell failed to start it",
-      });
-      frontendDetail ||= "the desktop shell failed to start it";
-      settleFrontend();
+      const detail = frontendDetail || "the frontend was never started";
+      state = applyBootEvent(state, { type: "failed", child: "frontend", detail });
+      frontendDetail = detail;
+      pushBoot(state, "ready", envDetail);
     }
+    settleFrontend();
   });
 
   const splashTimer = setTimeout(() => {
@@ -323,13 +339,21 @@ async function boot(): Promise<void> {
  *
  *  `drainFirst` is the only difference between the two: there is nothing to
  *  drain before the first boot, and calling stopServers() there would add
- *  its sleep to every cold start for no reason. */
-async function runBootCycle(drainFirst: boolean): Promise<void> {
-  if (booting) return;
+ *  its sleep to every cold start for no reason.
+ *
+ *  Returns whether a cycle actually RAN. The swallowed case is not an error --
+ *  declining to overlap two cycles is the whole point -- but it is not a
+ *  success either, and it used to be indistinguishable from one: backend:restart
+ *  answered `{ok: true}` to a click that drained nothing, respawned nothing and
+ *  said nothing, leaving the panel's own "Restarting…" label as the only tell.
+ *  Callers that report to a user need to be able to tell the two apart. */
+async function runBootCycle(drainFirst: boolean): Promise<boolean> {
+  if (booting) return false;
   booting = true;
   try {
     if (drainFirst) await stopServers();
     await boot();
+    return true;
   } finally {
     booting = false;
   }
@@ -423,6 +447,23 @@ app.whenReady().then(async () => {
     return { names: Object.keys(r.values), unreadable: r.unreadable };
   });
 
+  // The way out of credentials:write's refusal, and the reason that refusal
+  // can stay absolute. An unreadable store is the expected state after a
+  // rebuild (spike R1), and Setup's own banner used to tell the user to
+  // "re-enter them below" -- which writeCredentials() refuses, leaving an
+  // error whose real remedy (delete credentials.enc by hand) was named
+  // nowhere in the UI. Now it is a control on that banner. The main process
+  // still decides WHETHER to delete: see discardCredentials(), which refuses
+  // a readable store and refuses one that is unreadable only because the
+  // Keychain is unavailable this run.
+  ipcMain.handle("credentials:discard", () => {
+    try {
+      return { ok: true, ...discardCredentials() };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : "discard failed" };
+    }
+  });
+
   // The restart the browser version could never offer: the desktop app owns
   // the child, so it can drain it and bring it back cleanly. drainFirst is
   // true -- this is exactly the retry path, and runBootCycle's `booting`
@@ -430,10 +471,16 @@ app.whenReady().then(async () => {
   //
   // Whether it SHOULD restart is the renderer's decision
   // (frontend/lib/restart.ts): only it knows what is running.
+  //
+  // `ran` is reported rather than folded into `ok`: a cycle the `booting`
+  // guard declined is not a failure (nothing broke, and nothing was left
+  // half-drained) but it is not a restart either, and answering a bare
+  // `{ok: true}` to it told the panel a restart had happened when none had.
+  // The renderer says which of the two it was -- see SetupPanel's doRestart.
   ipcMain.handle("backend:restart", async () => {
     try {
-      await runBootCycle(true);
-      return { ok: true };
+      const ran = await runBootCycle(true);
+      return { ok: true, ran };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : "restart failed" };
     }

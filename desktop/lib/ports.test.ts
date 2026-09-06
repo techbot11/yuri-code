@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_BACKEND_PORT, DEFAULT_FRONTEND_PORT, defaultPorts, portBusyDetail, portsFromEnv } from "./ports.ts";
+import { DEFAULT_BACKEND_PORT, DEFAULT_FRONTEND_PORT, defaultPorts, notStartedDetail, portBusyDetail, portsFromEnv } from "./ports.ts";
 
 test("the shipping defaults are the ports the app is configured around", () => {
   // Fixed on purpose: VC_ALLOWED_ORIGINS and the LAN-access feature both
@@ -90,4 +90,18 @@ test("the busy-port message names the port and what to do", () => {
   assert.match(msg, /8000/);
   assert.match(msg, /backend/);
   assert.match(msg, /bin\/yuri up/, "the likely cause is the developer's own server");
+});
+
+test("the child refused for the OTHER one's port says whose port to free", () => {
+  // startServers() spawns nothing when either port is busy, so BOTH children
+  // are reported -- and the one that did not fail on its own account must
+  // still name the port that actually needs freeing. This message is what the
+  // window shows when the BACKEND port is taken (index.ts reads the page's
+  // detail off the frontend's event), so a version of it that did not name
+  // the backend's port would send the reader hunting the frontend's.
+  const msg = notStartedDetail(8198, "backend");
+  assert.match(msg, /^not started, because/, "it did not fail on its own account");
+  assert.match(msg, /8198/, "the port that has to be freed");
+  assert.match(msg, /backend/, "whose port it is");
+  assert.match(msg, /bin\/yuri up/, "and still the likeliest cause");
 });

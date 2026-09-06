@@ -48,4 +48,10 @@ contextBridge.exposeInMainWorld("yuriCredentials", {
   write: (updates: Record<string, string>) =>
     ipcRenderer.invoke("credentials:write", updates),
   names: () => ipcRenderer.invoke("credentials:names"),
+  // The deliberate way past a store this build cannot decrypt (spike R1's
+  // expected state after a rebuild). Exposed as its own channel rather than a
+  // flag on write(), so "discard what I cannot read" can never be a side
+  // effect of saving a key -- the main process refuses that merge, and this
+  // does not weaken it.
+  discardUnreadable: () => ipcRenderer.invoke("credentials:discard"),
 });

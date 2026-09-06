@@ -10,7 +10,7 @@ import * as path from "node:path";
 import type { BootEvent } from "../lib/boot";
 import type { Env } from "../lib/env";
 import { backendCwd, frontendCommand, pythonPath, type PathEnv } from "../lib/paths";
-import { defaultPorts, portBusyDetail, type Ports } from "../lib/ports";
+import { defaultPorts, notStartedDetail, portBusyDetail, type Ports } from "../lib/ports";
 import { credentialsEnv } from "./credentials";
 
 const HEALTH_TIMEOUT_MS = 60_000;
@@ -248,13 +248,29 @@ export async function startServers(env: Env,
     portInUse(ports.backend),
     portInUse(ports.frontend),
   ]);
-  if (backendBusy) {
-    emit({ type: "failed", child: "backend", detail: portBusyDetail(ports.backend, "backend") });
+  if (backendBusy || frontendBusy) {
+    // BOTH children are reported, because both of them failed: nothing was
+    // spawned, so neither is on its way. Reporting only the busy one was a
+    // measured hang, not a cosmetic gap -- index.ts decides what the window
+    // shows from a FRONTEND-side event, so a busy BACKEND port left that wait
+    // with nothing that could ever resolve it: the window sat on "Starting
+    // Yuri…" with no Retry and no Quit (67s, and it would have been forever),
+    // and `booting` was never released, so no later retry could run either.
+    // A survivor of stopServers()' SIGKILL holding the backend port lands in
+    // exactly that state permanently, which is the unrecoverable loop
+    // stopServers()' own docstring says it fixed, arriving by another door.
+    //
+    // Backend first: applyBootEvent keeps the FIRST failure as the boot's
+    // error, and when it is the backend's port that is taken, that is the
+    // true cause rather than the consequence.
+    emit({ type: "failed", child: "backend",
+           detail: backendBusy ? portBusyDetail(ports.backend, "backend")
+                               : notStartedDetail(ports.frontend, "frontend") });
+    emit({ type: "failed", child: "frontend",
+           detail: frontendBusy ? portBusyDetail(ports.frontend, "frontend")
+                                : notStartedDetail(ports.backend, "backend") });
+    return;
   }
-  if (frontendBusy) {
-    emit({ type: "failed", child: "frontend", detail: portBusyDetail(ports.frontend, "frontend") });
-  }
-  if (backendBusy || frontendBusy) return;
 
   // Registered before the first spawn: from here on, anything this function
   // starts is something stopServers() can find and kill.

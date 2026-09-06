@@ -98,6 +98,46 @@ export function credentialsEnv(): Record<string, string> {
   return withManifest(readCredentials());
 }
 
+/** Delete a store nothing on this machine can decrypt, so Setup can start
+ *  over.
+ *
+ *  This is the way OUT of writeCredentials()' refusal below, and the reason
+ *  that refusal can stay as absolute as it is. Spike R1 makes an unreadable
+ *  store the EXPECTED state after a rebuild -- an unsigned bundle's Keychain
+ *  access is tied to its own identity -- so "saving is refused, and the only
+ *  remedy is to find credentials.enc in Application Support and delete it by
+ *  hand" was a dead end the UI could not reach. It is now an action the user
+ *  takes deliberately, with the loss spelled out in the control that calls it
+ *  (frontend/lib/setup.ts's DISCARD_UNREADABLE_CONFIRM).
+ *
+ *  Two guards, both of which refuse rather than delete:
+ *
+ *   - A READABLE store is never touched here. Its keys can be cleared one at
+ *     a time by emptying a field and saving, which is reversible in the sense
+ *     that matters (you know what you are removing); wiping the file wholesale
+ *     is not, and this function must not become a way to lose working keys.
+ *   - A store that is unreadable only because safeStorage cannot reach the
+ *     Keychain AT ALL is never touched either. That condition is transient --
+ *     a locked login keychain comes back -- and it also blocks writing, so
+ *     discarding would destroy recoverable keys to unblock nothing. */
+export function discardCredentials(): { discarded: boolean } {
+  const before = readCredentialsDetailed();
+  if (!before.unreadable) {
+    throw new Error("the credential store can be read on this machine, so there is " +
+      "nothing to discard -- clear a key by emptying its field and saving");
+  }
+  if (!credentialsAvailable()) {
+    throw new Error("macOS is not letting Yuri reach the Keychain at all right now, so a " +
+      "store it may yet be able to read must not be deleted -- unlock your login keychain " +
+      "and try again. Your saved keys are untouched.");
+  }
+  // rmSync with force: the file was read a moment ago, but a missing file must
+  // not turn a discard into an error the user cannot act on.
+  fs.rmSync(storePath(), { force: true });
+  console.log("[yuri] discarded an undecryptable credentials.enc at the user's request");
+  return { discarded: true };
+}
+
 /** Merge `updates` into the store. An empty-string value REMOVES a key --
  *  Setup's way of clearing one -- so writing "" cannot store an empty
  *  credential that then masks a real one from the environment. */
@@ -111,7 +151,9 @@ export function writeCredentials(updates: Record<string, string>): { written: st
   // the "keys quietly vanish" failure this whole module exists to avoid --
   // see readCredentialsDetailed()'s comment. Refuse instead: the caller
   // (Setup) can then say so, rather than a merge quietly re-encrypting a
-  // stale, incomplete set under the new value.
+  // stale, incomplete set under the new value. Setup does not merely say so:
+  // discardCredentials() above is the deliberate way through, so this refusal
+  // is no longer a dead end for the user who hits it.
   const before = readCredentialsDetailed();
   if (before.unreadable) {
     throw new Error("the existing credential store could not be decrypted on this machine " +

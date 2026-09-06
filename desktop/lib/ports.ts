@@ -59,3 +59,15 @@ export function portBusyDetail(port: number, which: "backend" | "frontend"): str
   return `port ${port} is already in use, so the ${which} cannot start — ` +
          `stop whatever is listening on it (\`bin/yuri up\` uses this port) and try again`;
 }
+
+/** The message for the child that was refused because the OTHER one's port is
+ *  taken. startServers() spawns NOTHING when either port is busy -- a
+ *  half-started app is worse than a whole refusal -- so this child did not
+ *  fail on its own account, and it has to say whose port to go and free.
+ *
+ *  Naming the busy child is the load-bearing part: reporting a bare "port 8198
+ *  is in use" under the frontend's name would send the reader hunting a port
+ *  the frontend never wanted. */
+export function notStartedDetail(busyPort: number, busyChild: "backend" | "frontend"): string {
+  return `not started, because ${portBusyDetail(busyPort, busyChild)}`;
+}
