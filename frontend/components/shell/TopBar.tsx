@@ -35,13 +35,21 @@ export function TopBar() {
 
   // Resolved after mount, never during render: window.yuriBoot does not exist
   // on the server, and a control rendered from it during SSR would
-  // hydration-mismatch the way the clock above would. Undefined in a browser
-  // tab, which is why the button is not rendered there at all -- there is
-  // nothing it could do (GUIDE.md: a control that cannot work is not
-  // rendered), and the browser's own message says "address bar" instead.
-  const [openMicSettings, setOpenMicSettings] =
-    useState<(() => void) | undefined>(undefined);
-  useEffect(() => { setOpenMicSettings(micSettingsOpener()); }, []);
+  // hydration-mismatch the way the clock above would. False in a browser tab,
+  // which is why the button is not rendered there at all -- there is nothing
+  // it could do (GUIDE.md: a control that cannot work is not rendered), and
+  // the browser's own message says "address bar" instead.
+  //
+  // A BOOLEAN, and the opener is re-resolved in the click handler. It was
+  // briefly held in state as a function, which is a React trap with two
+  // symptoms at once: a state setter given a function treats it as an
+  // updater and CALLS it, so every mount fired the opener and macOS opened
+  // System Settings on every app start; and what got stored was the opener's
+  // return value, undefined, so the button this exists to render never
+  // appeared. Only the side effect was ever visible. Storing a plain flag
+  // removes the trap rather than working around it with a thunk.
+  const [canOpenMicSettings, setCanOpenMicSettings] = useState(false);
+  useEffect(() => { setCanOpenMicSettings(micSettingsOpener() !== undefined); }, []);
 
   return (
     <div className="top">
@@ -72,8 +80,8 @@ export function TopBar() {
             splash, which is hidden on a warm start). Shown only for the
             message that names that pane (lib/mic.ts's offersMicSettings), so
             it never appears beside a failure it cannot fix. */}
-        {!connected && offersMicSettings(failed) && openMicSettings && (
-          <button className="vmute" onClick={() => openMicSettings()}>
+        {!connected && offersMicSettings(failed) && canOpenMicSettings && (
+          <button className="vmute" onClick={() => micSettingsOpener()?.()}>
             Open Microphone settings
           </button>
         )}
