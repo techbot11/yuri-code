@@ -5,7 +5,7 @@ import { bootDetail, bootRows, type YuriBootState } from "./bootRows.ts";
 function state(over: Partial<YuriBootState> = {}): YuriBootState {
   return {
     phase: "starting", env: "ready", envDetail: "",
-    backend: "starting", frontend: "ready", errorDetail: "", ...over,
+    backend: "starting", frontend: "ready", errorDetail: "", mic: "granted", ...over,
   };
 }
 
@@ -106,4 +106,35 @@ test("otherwise the boot error is the detail", () => {
 test("a failed env with no detail falls back rather than showing nothing", () => {
   assert.equal(bootDetail(state({ env: "failed", envDetail: "", errorDetail: "backend died" })),
     "backend died");
+});
+
+test("a denied microphone gets a failed row, after the others", () => {
+  // Last, because it is a warning about something that will not work rather
+  // than a step of the boot -- and the boot rows are in boot order.
+  const rows = bootRows(state({ mic: "denied" }), 0);
+  const last = rows[rows.length - 1];
+  assert.equal(last.key, "mic");
+  assert.equal(last.label, "Microphone");
+  assert.equal(last.state, "failed");
+});
+
+test("a working microphone gets no row at all", () => {
+  // An always-green row is furniture; the checklist is for what needs saying.
+  for (const mic of ["granted", "not-determined", "unknown"] as const) {
+    const keys = bootRows(state({ mic }), 0).map((r) => r.key);
+    assert.ok(!keys.includes("mic"), `${mic} should be silent`);
+    assert.equal(keys.length, 3, `${mic} should leave the three boot rows alone`);
+  }
+});
+
+test("restricted says so too — it is not the same as granted", () => {
+  assert.equal(bootRows(state({ mic: "restricted" }), 0).length, 4);
+});
+
+test("the elapsed counter never lands on the microphone row", () => {
+  // The counter marks the first STILL-STARTING row; the mic row is failed, so
+  // it must not absorb the count and leave the real one unmarked.
+  const rows = bootRows(state({ mic: "denied", backend: "starting" }), 9000);
+  assert.equal(rows.find((r) => r.key === "backend")?.note, "9s");
+  assert.equal(rows.find((r) => r.key === "mic")?.note, "");
 });

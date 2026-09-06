@@ -18,7 +18,7 @@ import { bootDetail, bootRows, type YuriBootState } from "@/lib/bootRows.ts";
 import { waitMessage, type WaitPhase } from "@/lib/backendWait.ts";
 
 export function BootSplash({
-  phase, boot, startedAtMs, onRetry, onQuit,
+  phase, boot, startedAtMs, onRetry, onQuit, onMicSettings,
 }: {
   phase: WaitPhase;
   boot: YuriBootState | null;
@@ -30,6 +30,10 @@ export function BootSplash({
    *  rendered dead (GUIDE.md §6). */
   onRetry?: () => void;
   onQuit?: () => void;
+  /** Opens System Settings at Privacy & Security -> Microphone. Same
+   *  bridge-gated pattern as onRetry/onQuit: undefined outside Electron, so
+   *  the button that cannot work is not rendered at all. */
+  onMicSettings?: () => void;
 }) {
   // The splash owns its own second hand. SetupGate's `elapsedMs` only moves
   // when a retry fires, and that backs off to one attempt every 3s — a
@@ -72,6 +76,14 @@ export function BootSplash({
           </ul>
         ) : null}
         {detail ? <pre className="boot-err">{detail}</pre> : null}
+        {rows.some((r) => r.key === "mic") ? (
+          <div className="boot-mic">
+            She cannot hear you until macOS lets her.
+            {onMicSettings ? (
+              <button className="txtoggle" onClick={onMicSettings}>Open Settings</button>
+            ) : null}
+          </div>
+        ) : null}
         {failed && onRetry && onQuit ? (
           <div className="boot-actions">
             <button className="txtoggle primary" onClick={onRetry}>Try again</button>

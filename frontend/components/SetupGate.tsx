@@ -42,6 +42,8 @@ type YuriBootBridge = {
   onState: (cb: (s: YuriBootState) => void) => void;
   retry: () => void;
   quit: () => void;
+  micStatus: () => Promise<string>;
+  openMicSettings: () => void;
 };
 
 /** Same pattern as VoiceProvider's yuriTray read: a plain cast, guarded, so a
@@ -112,14 +114,25 @@ export function SetupGate({ children }: { children: React.ReactNode }) {
         startedAtMs={startedAt.current}
         onRetry={bridge && (() => bridge.retry())}
         onQuit={bridge && (() => bridge.quit())}
+        onMicSettings={bridge && (() => bridge.openMicSettings())}
       />
     );
   }
 
   // Before the very first check resolves. No wait has been measured yet, so
-  // there is nothing to count.
+  // there is nothing to count. A denied microphone is just as actionable
+  // here as in the `wait` branch above, so the settings button is offered
+  // the same way (bridge-gated, GUIDE.md §6).
   if (checks === null) {
-    return <BootSplash phase="checking" boot={boot} startedAtMs={null} />;
+    const bridge = yuriBoot();
+    return (
+      <BootSplash
+        phase="checking"
+        boot={boot}
+        startedAtMs={null}
+        onMicSettings={bridge && (() => bridge.openMicSettings())}
+      />
+    );
   }
   if (gateOpen(checks)) return <>{children}</>;
 

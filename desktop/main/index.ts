@@ -4,7 +4,7 @@
 // notices -- which environment the children get, whether the boot is ready
 // or failed, which tray state a set of facts means -- lives in ../lib as a
 // pure function with tests, because there is no Electron test environment.
-import { app, BrowserWindow, globalShortcut, ipcMain, shell } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, shell, systemPreferences } from "electron";
 import * as path from "node:path";
 import {
   applyBootEvent,
@@ -14,6 +14,7 @@ import {
   type ChildState,
 } from "../lib/boot";
 import { mergeEnv, withFallbackPath, type Env } from "../lib/env";
+import { MIC_SETTINGS_URL, normalizeMicStatus, type MicStatus } from "../lib/mic";
 import { externalOpenScheme, isAppUrl } from "../lib/urls";
 import { portsFromEnv } from "../lib/ports";
 import { startServers, stopServers } from "./servers";
@@ -206,6 +207,14 @@ function minimalPageUrl(opts: { failed: boolean; detail: string }): string {
  *  That is not a rare race; it is the normal order of events. */
 let lastBoot: unknown = null;
 
+/** The current TCC status. Read fresh each time rather than cached: the user
+ *  can change it in System Settings while the app is running, and a cached
+ *  "denied" would keep saying so after they fixed it. */
+function micStatus(): MicStatus {
+  if (process.platform !== "darwin") return "unknown";
+  return normalizeMicStatus(systemPreferences.getMediaAccessStatus("microphone"));
+}
+
 function pushBoot(state: BootState, env: ChildState, envDetail = ""): void {
   // Recorded BEFORE the window guard: the pushes that arrive with no window
   // yet are exactly the ones a late subscriber needs replayed.
@@ -216,6 +225,7 @@ function pushBoot(state: BootState, env: ChildState, envDetail = ""): void {
     backend: state.backend,
     frontend: state.frontend,
     errorDetail: state.error?.detail || "",
+    mic: micStatus(),
   };
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send("boot:state", lastBoot);
@@ -373,6 +383,21 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.on("tray:state", (_e, state: string) => setTrayState(state));
+
+  // Re-read on request, so the splash can refresh after the user visits
+  // System Settings without restarting the app.
+  ipcMain.handle("mic:status", () => micStatus());
+
+  // mic:settings is the one place a non-http(s) scheme is opened
+  // deliberately. externalOpenScheme()/openExternally() above refuse exactly
+  // that, because a page could otherwise hand shell.openExternal() a
+  // registered scheme that launches a local application -- but
+  // MIC_SETTINGS_URL is a compile-time constant in this repo, not a URL any
+  // page supplies, so that guard does not apply here. Never pass a
+  // page-sourced URL to shell.openExternal directly the way this line does.
+  ipcMain.on("mic:settings", () => {
+    void shell.openExternal(MIC_SETTINGS_URL);
+  });
 
   // Checked, not assumed: register() returns false when the accelerator is
   // already taken by another app, and an unlogged false is a shortcut that

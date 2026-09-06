@@ -12,6 +12,13 @@
 
 export type ChildState = "starting" | "ready" | "failed";
 
+/** Mirrors desktop/lib/mic.ts's MicStatus. Declared again rather than
+ *  imported: desktop/ is outside the frontend's build graph, and importing
+ *  across would break `next build`. Only the two actionable values are read
+ *  here, so a drift in the others cannot change what this renders. */
+export type MicStatus =
+  | "not-determined" | "granted" | "denied" | "restricted" | "unknown";
+
 /** Pushed by the desktop shell's main process over boot:state (see
  *  desktop/main/index.ts's pushBoot) — present only inside Electron. */
 export type YuriBootState = {
@@ -21,10 +28,11 @@ export type YuriBootState = {
   backend: ChildState;
   frontend: ChildState;
   errorDetail: string;
+  mic: MicStatus;
 };
 
 export type BootRow = {
-  key: "env" | "frontend" | "backend";
+  key: "env" | "frontend" | "backend" | "mic";
   label: string;
   state: ChildState;
   /** The row's own trailing detail, or "".
@@ -49,7 +57,7 @@ export type BootRow = {
  *  before `backend` is honest rather than cosmetic — the window is only
  *  shown once the frontend answers, so by the time this renders the
  *  interface really is up and the backend really is the one outstanding. */
-const ROWS: { key: BootRow["key"]; label: string }[] = [
+const ROWS: { key: "env" | "frontend" | "backend"; label: string }[] = [
   { key: "env", label: "Environment" },
   { key: "frontend", label: "Interface" },
   { key: "backend", label: "Backend" },
@@ -69,7 +77,7 @@ export function bootRows(
 ): BootRow[] {
   if (!s) return [];
   let noted = false;
-  return ROWS.map(({ key, label }) => {
+  const rows: BootRow[] = ROWS.map(({ key, label }) => {
     const state = s[key];
     // Sub-second elapsed shows nothing: a "0s" that appears for one frame
     // and is gone reads as a glitch, not as a measurement.
@@ -81,6 +89,19 @@ export function bootRows(
                : "";
     return { key, label, state, note };
   });
+
+  // Appended last, and outside the counter loop above on purpose: it is a
+  // warning about something that will not work, not a step of the boot, and
+  // a `failed` row must never absorb the elapsed counter from the row that
+  // is actually still starting.
+  //
+  // Silent when granted (an always-green row is furniture) and when
+  // not-determined (the TCC prompt arrives on the first getUserMedia, so
+  // there is nothing to act on yet).
+  if (s.mic === "denied" || s.mic === "restricted") {
+    rows.push({ key: "mic", label: "Microphone", state: "failed", note: "" });
+  }
+  return rows;
 }
 
 /** The one detail worth printing under a failed boot.

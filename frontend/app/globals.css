@@ -5014,3 +5014,19 @@ a.setup-fix:hover {
    have this" is not) -- connected and offline share the neutral --line so
    only the state that calls for action gets flagged at the row's edge. */
 .setup-agents li[data-state="disabled"] { border-left-color: var(--warn); }
+
+/* The boot splash's microphone line: shown only when the checklist carries a
+   "Microphone" row (denied/restricted -- see bootRows()), so this is never an
+   always-visible fixture. flex-shrink: 0 for the same reason .boot-sweep
+   needs it: the splash column overflows by a few pixels and flex shrinks
+   whatever has no intrinsic height first. */
+.boot-mic {
+   display: flex;
+   gap: 8px;
+   align-items: center;
+   flex-shrink: 0;
+   margin-top: 10px;
+   font-family: var(--mono);
+   font-size: 12px;
+   color: var(--danger);
+}

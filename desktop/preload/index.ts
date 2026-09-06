@@ -1,6 +1,7 @@
-// The only bridge between a renderer and the main process. Two channels, both
+// The only bridge between a renderer and the main process. Channels are
 // one-directional by design: the boot page receives state and can ask to
-// retry or quit; the app reports its tray state. Nothing else is exposed.
+// retry, quit, or re-read/open the microphone permission; the app reports
+// its tray state. Nothing else is exposed.
 import { contextBridge, ipcRenderer } from "electron";
 
 contextBridge.exposeInMainWorld("yuriBoot", {
@@ -30,6 +31,8 @@ contextBridge.exposeInMainWorld("yuriBoot", {
   },
   retry: () => ipcRenderer.send("boot:retry"),
   quit: () => ipcRenderer.send("boot:quit"),
+  micStatus: () => ipcRenderer.invoke("mic:status"),
+  openMicSettings: () => ipcRenderer.send("mic:settings"),
 });
 
 contextBridge.exposeInMainWorld("yuriTray", {
