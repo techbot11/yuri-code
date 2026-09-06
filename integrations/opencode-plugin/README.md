@@ -52,6 +52,16 @@ Claude Code's `${CLAUDE_PLUGIN_ROOT}`. If OpenCode later exposes a plugin-root
 variable to commands, use it and update the command file — for now, the install path
 above is what the command actually looks for.
 
+## Uninstall
+
+Remove exactly the two paths Install creates above (swap in `.opencode/commands/` if
+that's where you installed):
+
+```bash
+rm ~/.config/opencode/commands/voice-handoff.md
+rm -r ~/.config/opencode/commands/voice-handoff-bin
+```
+
 ## Configure (only for a remote / tunneled backend)
 
 On the same machine, no config is needed — it talks to `http://localhost:8000` and
