@@ -105,6 +105,16 @@ class Doctor(unittest.TestCase):
         # still works. Without claude, an agent is simply OFFLINE
         # (agents_available.py) -- no agent is bundled with Yuri, so a
         # missing one must not lock her out of starting at all.
+        #
+        # Both halves are pinned here on purpose, not just the NOT-required
+        # one: a test that only asserts what's absent from REQUIRED_CHECKS
+        # would still pass if some future edit emptied the set entirely
+        # (frozenset() also contains none of "tmux"/"opencode"/"claude").
+        # "home" and "database" are the half that must never silently drop
+        # out -- Yuri cannot start at all without them, unlike the agent
+        # checks above, which are allowed to fail without blocking her.
+        self.assertIn("home", doctor.REQUIRED_CHECKS)
+        self.assertIn("database", doctor.REQUIRED_CHECKS)
         self.assertIn("voice keys", doctor.REQUIRED_CHECKS)
         self.assertNotIn("tmux", doctor.REQUIRED_CHECKS)
         self.assertNotIn("opencode", doctor.REQUIRED_CHECKS)
