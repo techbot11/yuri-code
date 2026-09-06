@@ -27,9 +27,22 @@ _VERSION_RE = re.compile(r"^(\d+\.\d+\.\d+)\b", re.MULTILINE)
 VERSION_TIMEOUT_S = 5.0
 
 
-def resolve(which: Callable[[str], str | None] = shutil.which) -> str | None:
-    """The `claude` on PATH, or None. `which` is injected for testing."""
-    return which("claude")
+def resolve(which: Callable[[str], str | None] | None = None) -> str | None:
+    """The `claude` on PATH, or None. `which` is injected for testing.
+
+    The `shutil.which` lookup happens INSIDE the function body rather than
+    as the parameter's default value. A default binds at IMPORT time, so
+    `which: Callable = shutil.which` would freeze in a reference to
+    whatever `shutil.which` was when this module first loaded -- after
+    that, `mock.patch.object(shutil, "which", ...)` can never reach a
+    no-argument call site, because the frozen default is a different
+    object from the (now patched) attribute on the module. Every
+    no-argument caller (e.g. claude_runner.py's bare `agent_cli.resolve()`)
+    would then be silently unmockable, and a test that patches
+    `shutil.which` to control the outcome would falsely pass no matter
+    what it patches it to. Resolving at call time keeps it live.
+    """
+    return (which or shutil.which)("claude")
 
 
 def parse_version(output: str) -> str | None:

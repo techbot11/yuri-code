@@ -167,7 +167,7 @@ def checks() -> list[Check]:
                           f"({home_real}) is reachable; set it in Setup so she can work in "
                           f"your projects (sessions elsewhere will refuse to start)"))
 
-    claude = agent_cli.resolve(which=shutil.which)
+    claude = agent_cli.resolve()
     out.append(_check("claude", claude is not None,
                       agent_cli.describe(claude, agent_cli.version(claude) if claude else None),
                       Fix("url", CLAUDE_INSTALL_URL, "How to install Claude Code")))
