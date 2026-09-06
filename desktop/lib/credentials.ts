@@ -59,3 +59,22 @@ export function parseCredentials(raw: string): Record<string, string> {
   }
   return out;
 }
+
+/** The env a child gets for a set of credentials: the values, plus a manifest
+ *  naming which variables they are.
+ *
+ *  The manifest is not redundant. backend/config.py labels where each value
+ *  came from and anything it cannot account for falls through to "process
+ *  environment", at which point Setup warns the user to unset a shell export
+ *  that does not exist. That exact lie already happened once for the launcher
+ *  (config.py's _load_env_file comment records it); injecting credentials as
+ *  bare environment variables reintroduces it one layer over.
+ *
+ *  Names only -- the manifest never carries a value. Empty in, empty out: a
+ *  lone YURI_KEYCHAIN_KEYS="" would name nothing and only invite a consumer to
+ *  split it into one empty string. */
+export function withManifest(values: Record<string, string>): Record<string, string> {
+  const names = Object.keys(values);
+  if (names.length === 0) return {};
+  return { ...values, YURI_KEYCHAIN_KEYS: names.join(",") };
+}

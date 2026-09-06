@@ -11,7 +11,7 @@ import type { BootEvent } from "../lib/boot";
 import type { Env } from "../lib/env";
 import { backendCwd, frontendCommand, pythonPath, type PathEnv } from "../lib/paths";
 import { defaultPorts, portBusyDetail, type Ports } from "../lib/ports";
-import { readCredentials } from "./credentials";
+import { credentialsEnv } from "./credentials";
 
 const HEALTH_TIMEOUT_MS = 60_000;
 const HEALTH_POLL_MS = 250;
@@ -270,7 +270,7 @@ export async function startServers(env: Env,
   // backend, not here) inherit through it; the frontend gets it too because
   // it is cheaper to hand it uniformly than to reason about which of the
   // two might one day need a given key.
-  const withCredentials: Env = { ...env, ...readCredentials() };
+  const withCredentials: Env = { ...env, ...credentialsEnv() };
   const backend = spawn(
     pythonPath(penv),
     ["-m", "uvicorn", "main:app", "--port", String(ports.backend),
@@ -293,7 +293,7 @@ export async function startServers(env: Env,
       // secret key, so there is nothing here for it to lose to except by
       // coincidence -- and if a future key ever collided, winning is still
       // the right behavior for a Keychain value the user just saved.
-      env: { ...env, ...frontendCmd.env, ...readCredentials(), ELECTRON_RUN_AS_NODE: "1" },
+      env: { ...env, ...frontendCmd.env, ...credentialsEnv(), ELECTRON_RUN_AS_NODE: "1" },
       stdio: ["ignore", "pipe", "pipe"] });
   const frontendRec = track(cycle, "frontend", frontend, emit);
 

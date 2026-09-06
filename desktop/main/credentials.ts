@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import {
-  isSecretKey, parseCredentials, serializeCredentials,
+  isSecretKey, parseCredentials, serializeCredentials, withManifest,
 } from "../lib/credentials";
 
 function storePath(): string {
@@ -81,6 +81,21 @@ export function readCredentialsDetailed(): CredentialReadResult {
                   err instanceof Error ? err.message : "unknown error");
     return { values: {}, unreadable: true };
   }
+}
+
+/** The env a child gets: the credentials themselves, plus a manifest naming
+ *  which variables they are.
+ *
+ *  The manifest is not redundant. backend/config.py labels where each value
+ *  came from, and anything it cannot account for falls through to "process
+ *  environment" -- at which point Setup warns the user to unset a shell export
+ *  that does not exist. That exact lie already happened once for `yapcode up`
+ *  and is documented at config.py:88-100; injecting credentials as plain env
+ *  vars would reintroduce it one layer over. Names only: the manifest carries
+ *  no values.
+ */
+export function credentialsEnv(): Record<string, string> {
+  return withManifest(readCredentials());
 }
 
 /** Merge `updates` into the store. An empty-string value REMOVES a key --

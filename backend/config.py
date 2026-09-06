@@ -120,6 +120,48 @@ except Exception:
     pass
 
 
+# Credentials the desktop app decrypted from the Keychain and injected as real
+# environment variables (spec 6.3). YURI_KEYCHAIN_KEYS names them so they can
+# be LABELLED, and the labelling is the whole point: without it they fall
+# through to _source_of's "process environment" default, and Setup's
+# shell-shadow warning then tells the user to unset a shell export that does
+# not exist.
+#
+# That is not a hypothetical -- the identical lie happened for `yapcode up`'s
+# load_env() and is why the stamping in _load_env_file above exists at all (see
+# its comment). This is the same bug arriving one layer over, from the desktop
+# shell instead of the launcher.
+#
+# Set unconditionally for the names it lists, and AFTER the files are loaded:
+# the real environment outranks every file, so for these variables the keychain
+# genuinely IS where the effective value came from, even when a leftover .env
+# happens to hold the same string. The manifest carries names only, never
+# values.
+KEYCHAIN_SOURCE = "the app's keychain"
+
+
+def keychain_sources(getenv) -> dict[str, str]:
+    """{var: label} for the credentials the desktop app injected.
+
+    Takes `getenv` rather than reading os.environ, so this is reachable from a
+    test -- the module-level call below runs once at import, which a test
+    cannot arrange after the fact.
+
+    A named variable with no value is skipped: the manifest says what the shell
+    INTENDED to inject, and labelling an empty one would claim a provenance for
+    a value that is not there.
+    """
+    out: dict[str, str] = {}
+    for name in (getenv("YURI_KEYCHAIN_KEYS") or "").split(","):
+        name = name.strip()
+        if name and (getenv(name) or "").strip():
+            out[name] = KEYCHAIN_SOURCE
+    return out
+
+
+ENV_SOURCES.update(keychain_sources(os.getenv))
+
+
 # --- config provenance (startup summary + actionable errors) -----------------
 
 # Provider API keys the voice layer can mint sessions with (any one suffices).

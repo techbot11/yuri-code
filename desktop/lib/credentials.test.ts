@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   isSecretKey, parseCredentials, serializeCredentials, SECRET_KEYS,
+  withManifest,
 } from "./credentials.ts";
 
 test("a round trip preserves every value", () => {
@@ -60,4 +61,26 @@ test("only secret keys are accepted for encryption", () => {
   assert.equal(isSecretKey("YURI_HOME"), false);
   assert.equal(isSecretKey("ALLOWED_PROJECT_ROOTS"), false);
   assert.equal(isSecretKey(""), false);
+});
+
+test("the manifest names every credential it ships with", () => {
+  const got = withManifest({ GEMINI_API_KEY: "g", OPENAI_API_KEY: "o" });
+  assert.equal(got.GEMINI_API_KEY, "g");
+  assert.equal(got.OPENAI_API_KEY, "o");
+  assert.deepEqual(got.YURI_KEYCHAIN_KEYS.split(",").sort(),
+    ["GEMINI_API_KEY", "OPENAI_API_KEY"]);
+});
+
+test("no credentials means no manifest at all", () => {
+  // A lone YURI_KEYCHAIN_KEYS="" would name nothing and only invite the
+  // backend to split it into one empty string.
+  assert.deepEqual(withManifest({}), {});
+});
+
+test("the manifest carries names, never values", () => {
+  // The whole point of a separate manifest: it is safe to log, and the thing
+  // it exists to fix (a mislabelled provenance) needs only names.
+  const secret = "yuri-plaintext-canary-9713";
+  const got = withManifest({ GEMINI_API_KEY: secret });
+  assert.ok(!got.YURI_KEYCHAIN_KEYS.includes(secret));
 });
