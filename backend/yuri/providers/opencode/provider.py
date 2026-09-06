@@ -1004,6 +1004,17 @@ class OpenCodeProvider(AgentProvider):
         """None: there is no TUI to snapshot, exactly as the SDK backend does."""
         return None
 
+    async def list_server_sessions(self) -> list[dict[str, Any]]:
+        """Every session the server currently holds, not just the ones this
+        process has adopted (`list_native` filters to `self._handles`).
+
+        This is what `/session/handoff/opencode` resolves a bare `cwd`
+        against: it hands the raw list to `handoff.pick`, which matches
+        `location.directory`. Bridged through the provider's own loop, like
+        every other server call, so the underlying httpx client stays bound
+        to the one loop it was created on."""
+        return await self._arun(self._sessions())
+
     def list_native(self) -> list[dict[str, Any]]:
         if not self._handles:
             # Nothing registered means nothing to report, and no reason to hit

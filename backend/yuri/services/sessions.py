@@ -445,6 +445,59 @@ class SessionService:
                 "attach": self._attach_for(agent, handle), "already": False,
                 "mission_id": mission.id}
 
+    async def adopt_opencode(self, agent_id: str, handle: str, cwd: str,
+                             title: str | None, name: str | None = None) -> dict:
+        """Register an OpenCode session the user is running in their own
+        terminal, found by directory match (`providers/opencode/handoff.py`),
+        so the voice agent can co-drive it.
+
+        Unlike `adopt()`, there is no "resume": the OpenCode server already
+        holds the session (`agent.resume()` raises NotImplementedError for
+        this backend — see its docstring, "ask to rehydrate instead"). So
+        this brings the handle into the provider's known set the same way a
+        restart does (`rehydrate(known={handle: {}})` — the same
+        `_readopt` path `SessionService.rehydrate()` uses), then records the
+        session/mission rows `adopt()` records for Claude Code, so a handed-
+        off OpenCode session appears in her lists exactly like any other.
+        """
+        agent = self.registry.get(agent_id)
+        row = self.row_for(handle)
+        entry = self._native().get(handle)
+        if row is not None or entry is not None:
+            # Already hers (a session she started herself, or a previous
+            # handoff that got this far already) — report it rather than
+            # adopting it a second time.
+            return {"session_id": handle, "name": row.name if row else None,
+                    "mission_id": row.mission_id if row else None, "already": True}
+        restored = await agent.rehydrate(known={handle: {}})
+        if not any(r.get("handle") == handle for r in restored):
+            # The server didn't have it after all — gone between `pick()` and
+            # here, or unreachable. Better to say so than to invent a session.
+            raise ValueError(
+                "that OpenCode session could not be adopted (it may no longer be on the server)")
+        project = self.projects.resolve_or_create(cwd)
+        sess_name = self._pick_name(name or title, project.root_path)
+        mission = self.missions.create(project, sess_name, created_by="handoff", agent_id=agent.id)
+        row = AgentSession(project_id=project.id, agent_id=agent.id, native_session_id=handle,
+                           backend=agent.id, working_directory=project.root_path,
+                           mission_id=mission.id, status="idle", name=sess_name)
+        try:
+            self.store.sessions.insert(row)
+        except LiveSessionExists:
+            # Same race adopt() guards against: another caller won between
+            # our row_for() check and this insert.
+            existing = self.row_for(handle)
+            self.missions.set_status(mission, "cancelled", by="system",
+                                     reason="the handle was already adopted")
+            return {"session_id": handle, "name": existing.name if existing else None,
+                    "mission_id": existing.mission_id if existing else None, "already": True}
+        self._persist_name(agent, handle, sess_name)
+        self.bus.publish(YuriEvent.make(EventType.SESSION_CREATED, mission_id=mission.id, session_id=row.id,
+                                        agent_id=agent.id, project_id=project.id,
+                                        payload={"name": sess_name, "native_session_id": handle,
+                                                 "backend": agent.id, "adopted": True}))
+        return {"session_id": handle, "name": sess_name, "mission_id": mission.id, "already": False}
+
     def _attach_for(self, provider: AgentProvider, handle: str) -> str | None:
         """The co-drive command, or None when this backend has no pane. Never
         guess a pane name: a fabricated `tmux attach -t vc_xxxxxxxx` reaches the

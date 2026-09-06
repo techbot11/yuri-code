@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 
 import config
 import event_log
+import session_manager
 from cost_log import COST_LOG_PATH, append_cost_event
 from tmux_runner import scroll_pane, validate_session_id
 from tools import all_tools, dispatch_tool, tools_for_model
@@ -41,6 +42,7 @@ from yuri import setup_store
 from yuri.api.routes import build_router
 from yuri.own.search import SearchUnavailable
 from yuri.providers.base import ProviderUnavailable
+from yuri.providers.opencode import handoff as opencode_handoff
 
 # .env is loaded once, by `import config` above. No second load here: a CWD-based
 # re-read would restore the VC_AUTH_TOKEN a run mode intentionally left unset.
@@ -326,6 +328,18 @@ class HandoffRequest(BaseModel):
     name: str | None = None
 
 
+class OpenCodeHandoffRequest(BaseModel):
+    # OpenCode gives its custom commands no session-id variable, so the
+    # caller (integrations/opencode-plugin's handoff.sh) reports only its
+    # cwd; the session is resolved server-side (see providers/opencode/
+    # handoff.py). session_id is optional and only meaningful once the
+    # caller has already been told which id to pass — either because a
+    # previous call came back ambiguous, or because some future OpenCode
+    # release does expose one to commands.
+    cwd: str
+    session_id: str | None = None
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -538,6 +552,106 @@ async def handoff_session(req: HandoffRequest) -> dict[str, Any]:
                         f"(Ctrl-D), then run: {attach}") if attach else
                        (f"Reopened '{out['name']}' under yapcode, but this backend has no "
                         "terminal to attach to — drive it by voice.")}
+
+
+@app.post("/session/handoff/opencode", dependencies=[Depends(require_auth)])
+async def handoff_session_opencode(req: OpenCodeHandoffRequest) -> dict[str, Any]:
+    """Adopt an OpenCode session the user is running in their own terminal so
+    the voice agent can co-drive it.
+
+    A different mechanism from `/session/handoff`, because OpenCode is a
+    different shape: every session lives server-side (`GET /api/session`), so
+    there is nothing to reopen and no attach dance — the server is already
+    the single writer, and the caller's TUI is unaffected. This is consent,
+    not surgery.
+
+    OpenCode gives a command no session id, so the caller reports its
+    working directory and the session is resolved here by matching
+    `location.directory` (see providers/opencode/handoff.py's `pick`). Two
+    sessions in the same directory adopt NEITHER — guessing between two of
+    the user's own sessions is exactly the takeover `provider.py`'s
+    `rehydrate(known=...)` deliberately refuses; the same refusal governs
+    here, via `SessionService.adopt_opencode`.
+    """
+    # Realpath + containment-check BEFORE it is used for anything, exactly
+    # like the Claude Code path's cwd (there, inside SessionService.adopt via
+    # ProjectService.resolve_or_create) — fail closed, so a handoff cannot
+    # become a way to reach a directory the rest of the API refuses.
+    try:
+        resolved_cwd = session_manager.resolve_project_path(req.cwd)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        provider = yuri_app.container().registry.get("opencode")
+    except KeyError:
+        raise HTTPException(
+            status_code=400,
+            detail='OpenCode is not configured — add "opencode" to YURI_AGENTS and restart.')
+
+    # A pure probe (no acquire, never spawns) so a stopped OpenCode is
+    # reported for what it is rather than triggering a spawn just to answer
+    # a handoff request.
+    if not await provider.server.is_reachable():
+        raise HTTPException(
+            status_code=400,
+            detail=f"OpenCode is not running at {provider.server.url} — start it and try again.")
+
+    try:
+        sessions = await provider.list_server_sessions()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400, detail=f"OpenCode could not be reached: {exc}") from exc
+
+    sid = (req.session_id or "").strip()
+    if sid:
+        # The seam for the day OpenCode does expose a session id to commands,
+        # and what makes an ambiguous result recoverable today: the user is
+        # told the id, and can pass it back to skip pick() entirely.
+        target = next((s for s in sessions if str(s.get("id") or "") == sid), None)
+        if target is None:
+            raise HTTPException(
+                status_code=400, detail=f"no OpenCode session {sid!r} is on this server.")
+        directory = str((target.get("location") or {}).get("directory") or "")
+        try:
+            session_manager.resolve_project_path(directory)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"session {sid!r}'s directory is outside the allowed "
+                        "project roots.")) from exc
+        result = opencode_handoff.Pick(session=target, ambiguous=[], reason="")
+    else:
+        result = opencode_handoff.pick(sessions, resolved_cwd)
+
+    if result.ambiguous:
+        titles = [str(s.get("title") or s.get("id")) for s in result.ambiguous]
+        named = ", ".join(f'"{t}"' for t in titles)
+        return JSONResponse(status_code=409, content={
+            "sessions": [{"id": s.get("id"), "title": s.get("title") or s.get("id")}
+                        for s in result.ambiguous],
+            "message": (f"More than one session is open here: {named}. "
+                        "Run /voice-handoff <session-id> to choose."),
+        })
+    if result.session is None:
+        raise HTTPException(status_code=400, detail=result.reason)
+
+    session = result.session
+    handle = str(session.get("id") or "")
+    title = session.get("title") or None
+    try:
+        out = await yuri_app.container().sessions.adopt_opencode(
+            provider.id, handle, resolved_cwd, title)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    display = out["name"] or title or handle[:12]
+    # No `attach` field: there is nothing to attach to and nothing to exit —
+    # fabricating one would send the user through the Claude Code dance for
+    # no reason.
+    return {"session_id": out["session_id"], "title": display,
+            "message": (f'Voice is live on "{display}". Keep using your terminal — you are '
+                        "both talking to the same OpenCode server.")}
 
 
 def _set_winsize(fd: int, rows: int, cols: int) -> None:
