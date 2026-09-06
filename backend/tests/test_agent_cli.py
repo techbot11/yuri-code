@@ -1,4 +1,6 @@
+import subprocess
 import unittest
+from unittest import mock
 
 import agent_cli
 
@@ -28,6 +30,37 @@ class Resolve(unittest.TestCase):
         # doctor already reports a missing claude as a required failure; this
         # must not raise on the way there.
         self.assertIsNone(agent_cli.resolve(which=lambda _n: None))
+
+
+def _completed(stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(args=["claude", "--version"], returncode=0,
+                                       stdout=stdout, stderr=stderr)
+
+
+class Version(unittest.TestCase):
+    """version()'s success path -- previously only its exception branch was
+    covered, and only incidentally (a fake path that happens not to exist on
+    disk rather than a deliberate assertion). agent_cli looks up
+    `subprocess.run` as a module attribute inside the function body, so
+    patching it here reaches the call made at run time."""
+
+    def test_version_on_stdout(self):
+        with mock.patch.object(agent_cli.subprocess, "run",
+                               return_value=_completed(stdout="2.1.261 (Claude Code)\n")):
+            self.assertEqual(agent_cli.version("/opt/bin/claude"), "2.1.261")
+
+    def test_version_on_stderr_when_stdout_is_empty(self):
+        # Some builds print --version to stderr; version() falls back to it.
+        with mock.patch.object(agent_cli.subprocess, "run",
+                               return_value=_completed(stdout="", stderr="2.1.150\n")):
+            self.assertEqual(agent_cli.version("/opt/bin/claude"), "2.1.150")
+
+    def test_successful_run_with_no_version_in_output_is_none(self):
+        # A zero-exit run whose output has no parseable version must not
+        # raise -- it is a "we cannot show a version" case, not a failure.
+        with mock.patch.object(agent_cli.subprocess, "run",
+                               return_value=_completed(stdout="command not found")):
+            self.assertIsNone(agent_cli.version("/opt/bin/claude"))
 
 
 class Describe(unittest.TestCase):
