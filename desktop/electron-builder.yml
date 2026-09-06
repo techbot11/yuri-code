@@ -1,0 +1,67 @@
+# Unsigned, deliberately. Spike R1 measured that an unsigned packaged app CAN
+# use the microphone -- NSMicrophoneUsageDescription reaches Info.plist, the
+# TCC prompt appears, and getUserMedia succeeds with a real device, WebRTC
+# transport included. What it cannot do is keep the grant across a rebuild, so
+# expect a re-prompt on every packaged build during development. Signing is
+# deferred, not cancelled: a Developer ID gives TCC a durable identity and is
+# the fix if that friction becomes annoying.
+appId: com.yuri.app
+productName: Yuri OS
+copyright: Yuri OS
+
+directories:
+  output: dist
+  buildResources: assets
+
+# The asar carries only what runs. Source, tests and the payload build tree
+# are excluded -- the payload arrives via extraResources instead, unpacked,
+# because an interpreter cannot execute from inside an asar.
+files:
+  - out/**/*
+  - package.json
+  - "!**/*.ts"
+  - "!**/*.map"
+  - "!build/**"
+  - "!dist/**"
+
+extraResources:
+  # Built by desktop/scripts/build-python.py. Trimmed and size-gated by
+  # backend/yuri/payload.py.
+  - from: build/python
+    to: python
+  # The backend itself, minus its dev venv (the bundled interpreter above
+  # replaces it) and everything that is not runtime code.
+  - from: ../backend
+    to: backend
+    filter:
+      - "**/*"
+      - "!.venv/**"
+      - "!tests/**"
+      - "!**/__pycache__/**"
+      - "!.env"
+  # The built frontend, which `next start` serves.
+  - from: ../frontend/.next
+    to: frontend/.next
+  - from: ../frontend/public
+    to: frontend/public
+
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch: [arm64]
+  # No signing identity, and the hardened runtime off with it: hardenedRuntime
+  # without a signature produces a bundle macOS refuses to launch.
+  identity: null
+  hardenedRuntime: false
+  extendInfo:
+    # Without this the TCC prompt never appears and getUserMedia fails with
+    # no diagnosis. R1 verified this is the mechanism.
+    NSMicrophoneUsageDescription: >-
+      Yuri listens when you talk to her. Audio goes to the voice model you
+      configured and is not recorded to disk.
+    # She keeps running in the menu bar with no window open.
+    LSUIElement: false
+
+dmg:
+  title: Yuri OS

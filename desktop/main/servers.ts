@@ -3,11 +3,13 @@
 // Two children, mirroring what `bin/yuri up` starts: uvicorn on 8000 and
 // `next start` on 3000. Ports are fixed deliberately (spec §4.1) -- random
 // free ports would break VC_ALLOWED_ORIGINS and LAN access for no gain.
+import { app } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
 import * as net from "node:net";
 import * as path from "node:path";
 import type { BootEvent } from "../lib/boot";
 import type { Env } from "../lib/env";
+import { backendCwd, pythonPath, type PathEnv } from "../lib/paths";
 import { defaultPorts, portBusyDetail, type Ports } from "../lib/ports";
 
 const HEALTH_TIMEOUT_MS = 60_000;
@@ -25,6 +27,16 @@ const HEALTH_FETCH_MS = 2_000;
  *  that, and will pass the root in rather than deriving it. */
 export function repoRoot(): string {
   return path.resolve(__dirname, "../../..");
+}
+
+/** The real Electron values, gathered in one place so lib/paths.ts stays
+ *  pure and testable. */
+function pathEnv(): PathEnv {
+  return {
+    packaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    repoRoot: repoRoot(),
+  };
 }
 
 // How long SIGTERM gets before SIGKILL, and how long SIGKILL gets before a
@@ -230,11 +242,12 @@ export async function startServers(env: Env,
   // starts is something stopServers() can find and kill.
   cycles.push(cycle);
 
+  const penv = pathEnv();
   const backend = spawn(
-    path.join(root, "backend/.venv/bin/python"),
+    pythonPath(penv),
     ["-m", "uvicorn", "main:app", "--port", String(ports.backend),
      "--log-level", "info", "--timeout-graceful-shutdown", "3"],
-    { cwd: path.join(root, "backend"), env, stdio: ["ignore", "pipe", "pipe"] });
+    { cwd: backendCwd(penv), env, stdio: ["ignore", "pipe", "pipe"] });
   const backendRec = track(cycle, "backend", backend, emit);
 
   // ELECTRON_RUN_AS_NODE makes this Electron binary behave as plain Node, so

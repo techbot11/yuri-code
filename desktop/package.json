@@ -10,11 +10,14 @@
     "build": "tsc -p tsconfig.json && mkdir -p out/assets && cp assets/*.png out/assets/",
     "dev": "npm run build && electron .",
     "test": "node --test lib/*.test.ts",
-    "clean": "rm -rf out"
+    "clean": "rm -rf out",
+    "payload": "python3 ../desktop/scripts/build-python.py",
+    "dist": "npm run build && npx electron-builder --config electron-builder.yml"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "electron": "35.7.5",
+    "electron-builder": "26.0.20",
     "typescript": "~5.6.3"
   }
 }
