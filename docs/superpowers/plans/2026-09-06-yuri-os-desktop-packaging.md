@@ -26,6 +26,7 @@
 - **Do not modify `frontend/components/shell/Rail.tsx`.**
 - **Test runners.** Backend: `cd backend && .venv/bin/python -m unittest discover -s tests -q` (1657 passing). Frontend: `cd frontend && node --test lib/*.test.ts` (373 passing) — **pure functions only, there is no DOM environment**. Desktop: `npm --prefix desktop test` over `desktop/lib/*.test.ts` (56 passing) — **pure functions only**. There is no bash test harness. React components and main-process code are verified by running the app and probing it.
 - **Design guide** `docs/yuri/design/GUIDE.md`: a control that cannot work is not rendered; empty, loading and failed never look the same.
+- **No coding agent is ever bundled.** `claude`, `opencode` and any future agent are the user's own installations, discovered on `PATH` at runtime. The app connects to what is present and shows the rest as **offline** — it must never ship a copy of an agent, and must never refuse to start because one is missing. Task 1 removes the last bundled copy; Task 7 makes a missing agent an offline state rather than a locked door.
 
 ## File Structure
 
@@ -1719,6 +1720,389 @@ git commit -m "feat(desktop): offer to restart the backend, and say what that in
 
 ---
 
+### Task 7: Agents are external — offline, not a locked door
+
+**This task exists because of a clarification, not the spec.** No coding agent is bundled: `claude`, `opencode` and anything added later are the user's own installations, found on `PATH`. If one is installed the app connects to it; if not, it shows **offline** and everything else still works.
+
+Today it does the opposite. `backend/yuri/doctor.py:58` puts `claude` in `REQUIRED_CHECKS`, and `frontend/lib/setup.ts:96`'s `gateOpen` returns false while any required check fails — so on a machine with no `claude`, Yuri **refuses to start at all** and shows "Before Yuri can start". That is a locked door where the clarification asks for an offline badge.
+
+Voice keys stay required, and that is not an inconsistency: talking is Yuri's own capability, not a third party's. An agent is something she reaches out to.
+
+Note honestly what this does *not* do: **`codex` is not supported by this codebase today.** `YURI_AGENTS` understands `claude-code` and `opencode` only. This task makes the *shape* right — agents are discovered, and absence is an offline state — so adding another agent later is a registry entry plus a runner rather than a redesign. It does not add one.
+
+**Files:**
+- Create: `backend/agents_available.py`
+- Create: `backend/tests/test_agents_available.py`
+- Modify: `backend/yuri/doctor.py:58`
+- Modify: `backend/main.py` (extend the doctor payload)
+- Create: `frontend/lib/agents.ts`
+- Create: `frontend/lib/agents.test.ts`
+- Modify: `frontend/components/SetupPanel.tsx`
+- Modify: `frontend/app/globals.css`
+
+**Interfaces:**
+- Consumes: `backend/agent_cli.py`'s `resolve()` and `version()` from Task 1; `config.YURI_AGENTS`, `config.OPENCODE_BIN`.
+- Produces: `backend/agents_available.py` with `AgentStatus` (`name`, `label`, `available`, `detail`, `enabled`), `build(enabled, found, versions)`, `any_available(agents)`, `statuses()`; `frontend/lib/agents.ts` with `type Agent`, `agentLine(a)`, `anyAgentAvailable(list)`.
+
+- [ ] **Step 1: Write the failing backend test**
+
+Create `backend/tests/test_agents_available.py`:
+
+```python
+import unittest
+
+import agents_available as aa
+
+
+class Build(unittest.TestCase):
+    def test_an_installed_enabled_agent_is_available(self):
+        got = aa.build(enabled=("claude-code",),
+                       found={"claude": "/opt/bin/claude"},
+                       versions={"/opt/bin/claude": "2.1.261"})
+        claude = next(a for a in got if a.name == "claude-code")
+        self.assertTrue(claude.available)
+        self.assertTrue(claude.enabled)
+        self.assertIn("2.1.261", claude.detail)
+
+    def test_a_missing_agent_is_offline_not_an_error(self):
+        got = aa.build(enabled=("claude-code",), found={}, versions={})
+        claude = next(a for a in got if a.name == "claude-code")
+        self.assertFalse(claude.available)
+        self.assertTrue(claude.enabled)
+        # The wording matters: this is the string a user reads to understand
+        # that nothing is broken, they simply have not installed it.
+        self.assertIn("not installed", claude.detail)
+
+    def test_an_agent_not_enabled_is_reported_but_flagged_disabled(self):
+        # opencode installed but YURI_AGENTS does not ask for it: shown, so the
+        # user can see it is there to turn on, but not claimed as in use.
+        got = aa.build(enabled=("claude-code",),
+                       found={"claude": "/c", "opencode": "/o"}, versions={})
+        oc = next(a for a in got if a.name == "opencode")
+        self.assertTrue(oc.available)
+        self.assertFalse(oc.enabled)
+
+    def test_every_known_agent_appears_regardless(self):
+        # A registry, not a list of what happens to be installed: an agent
+        # missing from the UI entirely cannot be discovered by the user.
+        names = {a.name for a in aa.build(enabled=(), found={}, versions={})}
+        self.assertEqual(names, {"claude-code", "opencode"})
+
+
+class AnyAvailable(unittest.TestCase):
+    def test_none_installed(self):
+        self.assertFalse(
+            aa.any_available(aa.build(enabled=("claude-code",), found={}, versions={})))
+
+    def test_installed_but_not_enabled_is_not_usable(self):
+        got = aa.build(enabled=("claude-code",), found={"opencode": "/o"}, versions={})
+        # opencode is present but YURI_AGENTS does not use it, so she still has
+        # no agent she can actually run.
+        self.assertFalse(aa.any_available(got))
+
+    def test_one_installed_and_enabled(self):
+        got = aa.build(enabled=("claude-code",), found={"claude": "/c"}, versions={})
+        self.assertTrue(aa.any_available(got))
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `cd backend && .venv/bin/python -m unittest tests.test_agents_available -v`
+Expected: FAIL — `ModuleNotFoundError: No module named 'agents_available'`
+
+- [ ] **Step 3: Write it**
+
+Create `backend/agents_available.py`. Use a module docstring saying: which coding agents this machine has, as data; no agent is bundled with Yuri, `claude` and `opencode` are the user's own installations found on PATH, so she connects to what is there and reports the rest as offline; that is why a missing agent is a status here rather than a failed required check (see `yuri/doctor.py`'s `REQUIRED_CHECKS`, which this task removes `claude` from); `build()` takes its inputs so the registry is testable without a filesystem, and `statuses()` is the thin wrapper that reads the real world.
+
+```python
+from __future__ import annotations
+
+import shutil
+from dataclasses import dataclass
+from typing import Iterable
+
+import agent_cli
+import config
+
+
+@dataclass(frozen=True)
+class AgentStatus:
+    name: str          # the YURI_AGENTS token, e.g. "claude-code"
+    label: str         # for a person to read
+    available: bool    # is the binary on PATH
+    detail: str        # path and version, or why not
+    enabled: bool      # does YURI_AGENTS ask for it
+
+
+# Every agent this codebase can drive. A registry rather than "whatever is
+# installed": an agent absent from the UI cannot be discovered by the user.
+# Adding one is an entry here plus a runner -- codex is NOT here because
+# nothing in this codebase can drive it yet.
+REGISTRY: tuple[tuple[str, str, str], ...] = (
+    # (YURI_AGENTS token, label, binary name)
+    ("claude-code", "Claude Code", "claude"),
+    ("opencode", "OpenCode", "opencode"),
+)
+
+
+def build(enabled: Iterable[str], found: dict[str, str],
+          versions: dict[str, str]) -> list[AgentStatus]:
+    """The registry crossed with what is installed. Pure."""
+    on = set(enabled)
+    out: list[AgentStatus] = []
+    for token, label, binary in REGISTRY:
+        path = found.get(binary)
+        if path is None:
+            detail = f"not installed - no `{binary}` on PATH"
+        else:
+            ver = versions.get(path)
+            detail = f"{path} ({ver})" if ver else path
+        out.append(AgentStatus(name=token, label=label, available=path is not None,
+                               detail=detail, enabled=token in on))
+    return out
+
+
+def any_available(agents: Iterable[AgentStatus]) -> bool:
+    """Whether she can actually run anything: installed AND asked for. An
+    installed agent that YURI_AGENTS does not enable is not one she can use."""
+    return any(a.available and a.enabled for a in agents)
+
+
+def statuses() -> list[AgentStatus]:
+    """The real machine. `claude` goes through agent_cli so this and the SDK
+    resolve the same binary (see agent_cli.py)."""
+    found: dict[str, str] = {}
+    versions: dict[str, str] = {}
+    claude = agent_cli.resolve()
+    if claude:
+        found["claude"] = claude
+        ver = agent_cli.version(claude)
+        if ver:
+            versions[claude] = ver
+    oc = shutil.which(config.OPENCODE_BIN)
+    if oc:
+        found["opencode"] = oc
+    enabled = tuple(t.strip() for t in config.YURI_AGENTS.split(",") if t.strip())
+    return build(enabled, found, versions)
+```
+
+- [ ] **Step 4: Run it to verify it passes**
+
+Run: `cd backend && .venv/bin/python -m unittest tests.test_agents_available -v`
+Expected: PASS, 7 tests.
+
+- [ ] **Step 5: Stop a missing agent from locking the app**
+
+In `backend/yuri/doctor.py`, remove `"claude"` from `REQUIRED_CHECKS` and replace the comment above it, so the reason is recorded rather than the line just silently changing:
+
+```python
+# Yuri cannot work at all without these. Note what is NOT here:
+#
+#   tmux      without it the cli backend loses its live terminal pane, but the
+#             sdk backend still runs (spec 2.1).
+#   opencode  it only matters when YURI_AGENTS asks for it.
+#   claude    no agent is bundled with Yuri, and none is required to start
+#             her. An agent that is not installed is reported OFFLINE
+#             (agents_available.py) rather than blocking the app: voice,
+#             settings, memory and every other surface still work, and the
+#             agent surfaces say plainly why they cannot run. `claude` used to
+#             be here, which meant a machine without Claude Code installed got
+#             "Before Yuri can start" and no way in.
+REQUIRED_CHECKS: frozenset[str] = frozenset({"home", "database", "voice keys"})
+```
+
+The `claude` check itself stays — it is still worth reporting, and Task 1 made it report a version. It simply no longer gates.
+
+- [ ] **Step 6: Verify the gate actually opens without an agent**
+
+The point of the change, measured rather than assumed:
+
+```bash
+cd backend && .venv/bin/python -c "
+import yuri.doctor as d
+print('required:', sorted(d.REQUIRED_CHECKS))
+print('claude in required:', 'claude' in d.REQUIRED_CHECKS)"
+```
+
+Expected: `required: ['database', 'home', 'voice keys']` and `False`.
+
+Then prove the gate opens with no `claude` on `PATH` at all — a scrubbed `PATH` is the closest honest simulation of a machine without it:
+
+```bash
+cd backend && env PATH=/usr/bin:/bin .venv/bin/python -c "
+import yuri.doctor as d
+print('blocking with no claude on PATH:',
+      [c.name for c in d.checks() if c.required and not c.ok])"
+```
+
+Expected: `claude` is NOT in that list. If it is, the change did not take. (`voice keys` may appear if the scrubbed environment loses them — expected and correct; that is voice, not an agent.)
+
+- [ ] **Step 7: Put the statuses on the wire**
+
+In `backend/main.py`, extend the existing `GET /yuri/doctor` response with an `agents` array beside `checks`, so one fetch tells the UI both. Read the current handler first and follow its serialisation style:
+
+```python
+"agents": [
+    {"name": a.name, "label": a.label, "available": a.available,
+     "detail": a.detail, "enabled": a.enabled}
+    for a in agents_available.statuses()
+],
+```
+
+Add `import agents_available` to that file.
+
+- [ ] **Step 8: Write the failing frontend test**
+
+Create `frontend/lib/agents.test.ts`:
+
+```ts
+import test from "node:test";
+import assert from "node:assert/strict";
+import { agentLine, anyAgentAvailable, type Agent } from "./agents.ts";
+
+function agent(over: Partial<Agent> = {}): Agent {
+  return { name: "claude-code", label: "Claude Code", available: true,
+           detail: "/opt/bin/claude (2.1.261)", enabled: true, ...over };
+}
+
+test("an available, enabled agent reads as connected", () => {
+  assert.match(agentLine(agent()), /Connected/);
+});
+
+test("a missing agent reads as offline, not as an error", () => {
+  // "Offline" is the word: nothing is broken, it is simply not installed.
+  const line = agentLine(agent({ available: false, detail: "not installed - no `claude` on PATH" }));
+  assert.match(line, /Offline/);
+  assert.doesNotMatch(line, /error|failed|broken/i);
+});
+
+test("installed but not enabled says so distinctly", () => {
+  // Three states, three strings: connected, offline, available-but-off.
+  // Collapsing the third into either neighbour hides a one-setting fix.
+  const line = agentLine(agent({ enabled: false }));
+  assert.doesNotMatch(line, /Connected/);
+  assert.doesNotMatch(line, /Offline/);
+  assert.match(line, /not turned on/i);
+});
+
+test("anyAgentAvailable needs installed AND enabled", () => {
+  assert.equal(anyAgentAvailable([agent()]), true);
+  assert.equal(anyAgentAvailable([agent({ available: false })]), false);
+  assert.equal(anyAgentAvailable([agent({ enabled: false })]), false);
+  assert.equal(anyAgentAvailable([]), false);
+});
+
+test("one working agent is enough even when another is offline", () => {
+  assert.equal(anyAgentAvailable([
+    agent({ name: "opencode", available: false }),
+    agent(),
+  ]), true);
+});
+```
+
+- [ ] **Step 9: Run it to verify it fails**
+
+Run: `cd frontend && node --test lib/agents.test.ts`
+Expected: FAIL — cannot find module `./agents.ts`
+
+- [ ] **Step 10: Write it**
+
+Create `frontend/lib/agents.ts`. Head it with a comment explaining: no agent ships with Yuri, so "not installed" is an ordinary blameless state whose word is OFFLINE rather than an error, and it must stay distinguishable from "installed but not turned on", which is a one-setting fix rather than an install. Pure, so `node --test` reaches it.
+
+```ts
+export type Agent = {
+  /** The YURI_AGENTS token, e.g. "claude-code". */
+  name: string;
+  label: string;
+  available: boolean;
+  detail: string;
+  enabled: boolean;
+};
+
+/** One line for one agent. Three states, three strings -- collapsing
+ *  available-but-disabled into either neighbour hides the fix. */
+export function agentLine(a: Agent): string {
+  if (!a.available) return `Offline — ${a.detail}`;
+  if (!a.enabled) return `Installed, not turned on — ${a.detail}`;
+  return `Connected — ${a.detail}`;
+}
+
+/** Whether she can run anything at all: installed AND enabled. Used to
+ *  explain an agent surface that has nothing to offer, rather than showing an
+ *  empty list that looks like a loading failure. */
+export function anyAgentAvailable(list: Agent[]): boolean {
+  return list.some((a) => a.available && a.enabled);
+}
+```
+
+- [ ] **Step 11: Run it to verify it passes**
+
+Run: `cd frontend && node --test lib/*.test.ts`
+Expected: PASS — 383 + 5 = 388 tests.
+
+- [ ] **Step 12: Show it in Setup**
+
+In `frontend/components/SetupPanel.tsx`, render the agents from the doctor payload as their own small section, using `agentLine` for each. When `anyAgentAvailable` is false, say what that means in one sentence rather than leaving an empty region — an empty list is indistinguishable from a failed fetch, which is the rule `docs/yuri/design/GUIDE.md` exists to enforce:
+
+```tsx
+{agents.length > 0 ? (
+  <div className="setup-agents">
+    <h3 className="viewtitle">Coding agents</h3>
+    {!anyAgentAvailable(agents) ? (
+      <div className="mcp-blurb">
+        None available. Yuri still works — voice, memory and settings are hers —
+        but she cannot start a coding session until one is installed.
+      </div>
+    ) : null}
+    <ul>
+      {agents.map((a) => (
+        <li key={a.name} data-available={a.available && a.enabled}>
+          <span className="agent-label">{a.label}</span>
+          <span className="agent-detail">{agentLine(a)}</span>
+        </li>
+      ))}
+    </ul>
+  </div>
+) : null}
+```
+
+Add a `.setup-agents` rule to `frontend/app/globals.css` using existing tokens, with `[data-available="false"]` in `var(--dim)` and `true` in `var(--ink)` — offline recedes, connected reads.
+
+- [ ] **Step 13: Verify the whole point end to end**
+
+Launch the packaged app (Task 3's Step 10) from a shell whose `PATH` excludes `claude`. Note that the shell resolves a login-shell environment, so scrub it in the launching shell and confirm from the splash's Environment row detail which way it resolved. Confirm:
+
+1. The app **starts** — the splash completes and the shell appears. Before this task it showed "Before Yuri can start" with no way in.
+2. Setup's Coding agents section shows Claude Code as **Offline**, with the "None available" sentence.
+3. Voice still connects — the claim that agents are not load-bearing for the rest of her.
+
+Report all three from what you observed, not from what the code implies.
+
+- [ ] **Step 14: Run every suite**
+
+```bash
+cd backend && .venv/bin/python -m unittest discover -s tests -q
+cd ../frontend && node --test lib/*.test.ts
+npm --prefix ../desktop test
+```
+
+Expected: 1672, 388, 72 — all passing.
+
+- [ ] **Step 15: Commit**
+
+```bash
+git add backend/agents_available.py backend/tests/test_agents_available.py backend/yuri/doctor.py backend/main.py frontend/lib/agents.ts frontend/lib/agents.test.ts frontend/components/SetupPanel.tsx frontend/app/globals.css
+git commit -m "feat(agents): a missing agent is offline, not a locked door"
+```
+
+**Ordering note:** this task is independent of Tasks 2-6 and touches agent resolution like Task 1 does. It can be pulled forward to run second if the offline behaviour matters more than packaging.
+
+---
+
 ## Self-review
 
 **Spec coverage**
@@ -1736,6 +2120,7 @@ git commit -m "feat(desktop): offer to restart the backend, and say what that in
 | §6.4 label restart-required settings and offer the restart | 6 |
 | §6.4 refuse while a mission runs, or say what it interrupts | 6 |
 | §11 signing and notarization deferred | Global constraint; unsigned throughout |
+| **Clarification, not in the spec: agents are never bundled; absent means offline, not blocked** | 1 (drops the last bundled copy) and 7 (offline instead of a locked door) |
 
 **Deliberately out of scope**, each with a reason: Intel/universal builds (R2 names it a separate later target); code signing and notarization (spec §11, and R1 makes it *indicated* rather than required — the app works unsigned); auto-update; Windows (spec §10 keeps the shape platform-agnostic but targets macOS first); auto-restarting a child that crashes *after* boot without asking (2a's review confirmed a silent restart loop is worse than a visibly dead server — Task 6 gives the user the button instead).
 
