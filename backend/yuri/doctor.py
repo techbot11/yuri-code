@@ -14,6 +14,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 
+import agent_cli
 import config
 from yuri.home import Home
 from yuri.store.sqlite import SCHEMA_VERSION, SqliteStore
@@ -166,9 +167,9 @@ def checks() -> list[Check]:
                           f"({home_real}) is reachable; set it in Setup so she can work in "
                           f"your projects (sessions elsewhere will refuse to start)"))
 
-    claude = shutil.which("claude")
+    claude = agent_cli.resolve(which=shutil.which)
     out.append(_check("claude", claude is not None,
-                      claude or "not on PATH — install Claude Code",
+                      agent_cli.describe(claude, agent_cli.version(claude) if claude else None),
                       Fix("url", CLAUDE_INSTALL_URL, "How to install Claude Code")))
     tmux = shutil.which("tmux")
     out.append(_check("tmux", tmux is not None,

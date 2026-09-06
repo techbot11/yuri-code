@@ -25,6 +25,7 @@ from uuid import uuid4
 
 import claude_agent_sdk as sdk
 
+import agent_cli
 import config
 from permissions import classify, is_plan_file_write, mode_covers
 from event_log import log_event
@@ -249,6 +250,12 @@ class SDKClaudeRunner(ClaudeRunner):
             # Passing model="" would ask for a model literally named "", so an
             # unset model omits the option and lets the SDK resolve it.
             **({"model": s.model} if s.model else {}),
+            # The SDK prefers its own bundled `claude` over the one on PATH,
+            # so without this an sdk session and a cli session run different
+            # Claude Code versions with nothing saying so. Omitted when there
+            # is no `claude` at all, which leaves the SDK's own error (and
+            # doctor's required-check failure) to say so.
+            **({"cli_path": p} if (p := agent_cli.resolve()) else {}),
             cwd=cwd,
             permission_mode=s.mode,      # risky tools route to can_use_tool in default/plan
             can_use_tool=_cb,
