@@ -604,6 +604,15 @@ async def handoff_session_opencode(req: OpenCodeHandoffRequest) -> dict[str, Any
             status_code=400, detail=f"OpenCode could not be reached: {exc}") from exc
 
     sid = (req.session_id or "").strip()
+    # What actually gets adopted into: `resolved_cwd` (from the caller's own
+    # `cwd`) by default, but the `session_id` branch below re-points this at
+    # the TARGET session's own resolved directory. The two are independent
+    # containment checks — a `cwd` inside the sandbox says nothing about
+    # where session `sid` actually lives — so adopt_opencode must never see
+    # `resolved_cwd` once a session id has been resolved to a directory of
+    # its own; that seam is exactly what let a session get filed under the
+    # wrong project when the two diverged.
+    adopt_cwd = resolved_cwd
     if sid:
         # The seam for the day OpenCode does expose a session id to commands,
         # and what makes an ambiguous result recoverable today: the user is
@@ -613,8 +622,20 @@ async def handoff_session_opencode(req: OpenCodeHandoffRequest) -> dict[str, Any
             raise HTTPException(
                 status_code=400, detail=f"no OpenCode session {sid!r} is on this server.")
         directory = str((target.get("location") or {}).get("directory") or "")
+        if not directory:
+            # Real OpenCode sessions always carry `location.directory` — this
+            # is not a likely input. But `resolve_project_path("")` treats an
+            # empty directory as "vague" and silently defaults to the first
+            # allowed root (see session_manager.py), which would make this
+            # check assert nothing about the session it's meant to be vetting
+            # and file it under an unrelated project. Refuse instead of
+            # defaulting, so the check stays honest — do not delete this as
+            # dead code just because the input never happens today.
+            raise HTTPException(
+                status_code=400,
+                detail=f"session {sid!r} has no directory Yuri can place it in.")
         try:
-            session_manager.resolve_project_path(directory)
+            adopt_cwd = session_manager.resolve_project_path(directory)
         except ValueError as exc:
             raise HTTPException(
                 status_code=400,
@@ -641,7 +662,7 @@ async def handoff_session_opencode(req: OpenCodeHandoffRequest) -> dict[str, Any
     title = session.get("title") or None
     try:
         out = await yuri_app.container().sessions.adopt_opencode(
-            provider.id, handle, resolved_cwd, title)
+            provider.id, handle, adopt_cwd, title)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

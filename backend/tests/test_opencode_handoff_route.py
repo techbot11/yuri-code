@@ -147,6 +147,59 @@ class Resolution(Base):
         self.assertEqual(out["session_id"], sid)
         self.assertEqual(len(self.c.sessions.list()), 1)
 
+    async def test_an_explicit_session_id_files_the_session_under_its_OWN_directory_not_the_cwd(self):
+        """The bug this guards: the `session_id` branch validated the
+        TARGET session's own `location.directory` against
+        ALLOWED_PROJECT_ROOTS, then threw that result away and adopted
+        into `resolved_cwd` (computed from the caller's own `cwd`) instead.
+
+        Both `foo` and `bar` here are real, independently-allowed
+        subdirectories, so both containment checks pass on their own --
+        this is not a sandbox escape, it's a mis-filed project. Session
+        `sid` actually runs in `bar`; the caller reports `cwd=foo` (as it
+        would if it were still sitting in its own shell in a different
+        directory than the one it's asking about) and names `sid`
+        explicitly. The adopted row -- and the project it's filed under --
+        must follow `sid`'s own directory (`bar`), never the caller's
+        `cwd` (`foo`).
+
+        Before the fix this passed with the row filed under `foo` /
+        working_directory=.../foo -- wrong, but the old version of this
+        test never noticed because it always used a `cwd` that already
+        matched the target session's own directory.
+        """
+        other = os.path.join(self.root, "bar")
+        os.makedirs(other, exist_ok=True)
+        # proj plays the role of "foo" here: allowed, but NOT where `sid` runs.
+        sid = self.fake.state.new_session(other, title="from bar")
+        out = await self._call(self.proj, session_id=sid)
+        self.assertEqual(out["session_id"], sid)
+
+        row = self.c.sessions.row_for(sid)
+        self.assertIsNotNone(row)
+        self.assertEqual(os.path.realpath(row.working_directory), other)
+        project = self.c.projects.get(row.project_id)
+        self.assertEqual(os.path.realpath(project.root_path), other)
+        self.assertNotEqual(os.path.realpath(row.working_directory), self.proj)
+
+    async def test_a_session_id_target_with_no_directory_is_refused_not_defaulted(self):
+        """`session_manager.resolve_project_path("")` treats an empty
+        directory as "vague" and silently defaults to the first allowed
+        root rather than raising. Since the recovery path validates the
+        TARGET session's own `location.directory`, a session with no
+        directory metadata would sail through that check by default --
+        the check would then assert nothing about the session it's
+        supposed to be vetting, and file it under an unrelated project.
+        It must be refused instead.
+        """
+        sid = self.fake.state.new_session("", title="no directory")
+        with self.assertRaises(Exception) as cm:
+            await self._call(self.proj, session_id=sid)
+        self.assertEqual(cm.exception.status_code, 400)
+        self.assertIn("no directory", cm.exception.detail)
+        # Refused before adoption -- nothing recorded.
+        self.assertEqual(self.c.sessions.list(), [])
+
 
 if __name__ == "__main__":
     unittest.main()
