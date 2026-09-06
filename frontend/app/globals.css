@@ -4956,3 +4956,46 @@ a.setup-fix:hover {
    }
    .boot-rows li[data-state="starting"] .boot-mark { animation: none; }
 }
+
+/* Setup's "Coding agents" section: no coding agent ships with Yuri, so this
+   list is a status board of what she found on PATH, not a checklist she is
+   graded against -- offline recedes, connected reads. */
+.setup-agents {
+   margin-top: 22px;
+}
+
+.setup-agents ul {
+   display: flex;
+   flex-direction: column;
+   gap: 6px;
+   margin: 8px 0 0;
+   padding: 0;
+   list-style: none;
+}
+
+.setup-agents li {
+   display: flex;
+   align-items: baseline;
+   gap: 12px;
+   padding: 7px 10px;
+   border: 1px solid var(--line);
+   border-radius: 8px;
+}
+
+.setup-agents .agent-label {
+   min-width: 110px;
+   font-family: var(--disp);
+   text-transform: uppercase;
+   letter-spacing: 0.06em;
+   font-size: 10px;
+   color: var(--mut);
+}
+
+.setup-agents .agent-detail {
+   font-family: var(--mono);
+   font-size: 12px;
+   overflow-wrap: anywhere;
+}
+
+.setup-agents li[data-available="false"] .agent-detail { color: var(--dim); }
+.setup-agents li[data-available="true"]  .agent-detail { color: var(--ink); }

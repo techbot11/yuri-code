@@ -27,8 +27,9 @@ class Resolve(unittest.TestCase):
         self.assertEqual(agent_cli.resolve(which=lambda _n: "/opt/bin/claude"), "/opt/bin/claude")
 
     def test_absent_is_none_not_an_exception(self):
-        # doctor already reports a missing claude as a required failure; this
-        # must not raise on the way there.
+        # doctor and agents_available both report a missing claude as an
+        # offline agent, not a required failure (see doctor.REQUIRED_CHECKS);
+        # this must not raise on the way there.
         self.assertIsNone(agent_cli.resolve(which=lambda _n: None))
 
 

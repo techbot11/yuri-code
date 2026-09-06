@@ -20,6 +20,7 @@ from typing import Callable
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+import agents_available
 import config
 from yuri import doctor, setup_store
 from yuri.app import container, last_spoke_at, narration_mode, set_narration_mode
@@ -403,7 +404,16 @@ def build_router(require_auth: Callable) -> APIRouter:
                                         "payload": c.fix.payload,
                                         "label": c.fix.label}} if c.fix else {})}
                            for c in rows],
-                "ok": all(c.ok for c in rows if c.required)}
+                "ok": all(c.ok for c in rows if c.required),
+                # Coding agents are external, not required checks (see
+                # REQUIRED_CHECKS above): this is where the UI learns which
+                # ones are installed and enabled, separately from what gates
+                # the app.
+                "agents": [
+                    {"name": a.name, "label": a.label, "available": a.available,
+                     "detail": a.detail, "enabled": a.enabled}
+                    for a in agents_available.statuses()
+                ]}
 
     @r.get("/config", dependencies=[SETUP_ROUTE_GUARD])
     async def read_config():

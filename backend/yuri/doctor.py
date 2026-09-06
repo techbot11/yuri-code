@@ -52,11 +52,19 @@ class Check:
     fix: Fix | None = None
 
 
-# Yuri cannot work at all without these. tmux is absent on purpose: without
-# it the cli backend loses its live terminal pane, but the sdk backend still
-# runs (spec §2.1). opencode is absent because it already only matters when
-# YURI_AGENTS asks for it.
-REQUIRED_CHECKS: frozenset[str] = frozenset({"home", "database", "claude", "voice keys"})
+# Yuri cannot work at all without these. Note what is NOT here:
+#
+#   tmux      without it the cli backend loses its live terminal pane, but the
+#             sdk backend still runs (spec 2.1).
+#   opencode  it only matters when YURI_AGENTS asks for it.
+#   claude    no agent is bundled with Yuri, and none is required to start
+#             her. An agent that is not installed is reported OFFLINE
+#             (agents_available.py) rather than blocking the app: voice,
+#             settings, memory and every other surface still work, and the
+#             agent surfaces say plainly why they cannot run. `claude` used to
+#             be here, which meant a machine without Claude Code installed got
+#             "Before Yuri can start" and no way in.
+REQUIRED_CHECKS: frozenset[str] = frozenset({"home", "database", "voice keys"})
 
 
 CLAUDE_INSTALL_URL = "https://docs.claude.com/en/docs/claude-code/overview"

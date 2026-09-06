@@ -9,6 +9,7 @@
 // leaving it empty changes nothing.
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, yget, yput } from "@/lib/api";
+import { agentLine, anyAgentAvailable, type Agent } from "@/lib/agents";
 import {
   blocking, canSave, effectsSentence, fieldPlaceholder, fieldValue, fixAction,
   pendingChanges, shellShadowWarning,
@@ -46,6 +47,7 @@ function CopyCommand({ command, label }: { command: string; label: string }) {
 
 export function SetupPanel({ onPass }: { onPass?: () => void }) {
   const [checks, setChecks] = useState<DoctorCheck[] | null>(null);
+  const [agents, setAgents] = useState<Agent[]>([]);
   const [keys, setKeys] = useState<ManagedKey[] | null>(null);
   const [where, setWhere] = useState("");
   const [draft, setDraft] = useState<Record<string, string>>({});
@@ -57,11 +59,12 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
   const load = useCallback(async (): Promise<DoctorCheck[] | null> => {
     try {
       const [d, c] = await Promise.all([
-        yget<{ checks: DoctorCheck[]; ok: boolean }>("doctor"),
+        yget<{ checks: DoctorCheck[]; ok: boolean; agents?: Agent[] }>("doctor"),
         yget<{ keys: ManagedKey[]; path: string }>("config"),
       ]);
       const fresh = d.checks || [];
       setChecks(fresh);
+      setAgents(d.agents || []);
       setKeys(c.keys || []);
       setWhere(c.path || "");
       setLoadError(null);
@@ -170,6 +173,26 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
           );
         })}
       </div>
+
+      {agents.length > 0 ? (
+        <div className="setup-agents">
+          <h3 className="viewtitle">Coding agents</h3>
+          {!anyAgentAvailable(agents) ? (
+            <div className="mcp-blurb">
+              None available. Yuri still works — voice, memory and settings are hers —
+              but she cannot start a coding session until one is installed.
+            </div>
+          ) : null}
+          <ul>
+            {agents.map((a) => (
+              <li key={a.name} data-available={a.available && a.enabled}>
+                <span className="agent-label">{a.label}</span>
+                <span className="agent-detail">{agentLine(a)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       <div className="mcp-head" style={{ marginTop: 22 }}>
         <h3 className="sectitle">Keys and models</h3>

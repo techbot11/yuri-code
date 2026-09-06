@@ -100,13 +100,15 @@ class Doctor(unittest.TestCase):
             self.assertIsInstance(c.detail, str)
             self.assertIsInstance(c.required, bool)
 
-    def test_tmux_is_not_required_but_claude_is(self):
+    def test_tmux_and_claude_are_not_required(self):
         # Without tmux the cli backend loses its live pane; the sdk backend
-        # still works. Without claude, nothing does.
-        self.assertIn("claude", doctor.REQUIRED_CHECKS)
+        # still works. Without claude, an agent is simply OFFLINE
+        # (agents_available.py) -- no agent is bundled with Yuri, so a
+        # missing one must not lock her out of starting at all.
         self.assertIn("voice keys", doctor.REQUIRED_CHECKS)
         self.assertNotIn("tmux", doctor.REQUIRED_CHECKS)
         self.assertNotIn("opencode", doctor.REQUIRED_CHECKS)
+        self.assertNotIn("claude", doctor.REQUIRED_CHECKS)
 
     def test_a_password_in_the_opencode_url_reaches_no_detail(self):
         """Ruling 9. OPENCODE_SERVER_PASSWORD is not the only way a password
