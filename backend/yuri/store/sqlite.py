@@ -253,8 +253,23 @@ class SqliteSessions(_Base, SessionRepo):
             raise
 
     def get_by_native(self, native_id):
+        # `rowid DESC` is the tie-breaker, not decoration. native_session_id
+        # has no unique index on purpose -- adopt() inserts a SECOND row for a
+        # handle whose first row is `stopped`, keeping the closed mission's
+        # history -- so two rows routinely answer this query. started_at is
+        # utcnow() at MILLISECOND resolution (yuri/domain/ids.py), so an
+        # adopt/stop/adopt inside one millisecond gives them equal values and
+        # `started_at DESC` alone has nothing left to order by: SQLite may
+        # return either, and the caller silently gets the STOPPED session's
+        # mission. rowid always increases with insertion order, so it settles
+        # a tie the timestamp cannot. Same fix, same reason, as events_since
+        # below.
+        #
+        # `SELECT *` does not project rowid, but this is a single-level query
+        # over the table, so ORDER BY can still see it -- unlike events_since,
+        # where an inner SELECT had to name it for the outer ORDER BY to use.
         return self._one("SELECT * FROM sessions WHERE native_session_id = ? "
-                         "ORDER BY started_at DESC LIMIT 1", (native_id,))
+                         "ORDER BY started_at DESC, rowid DESC LIMIT 1", (native_id,))
 
     def list(self, mission_id=None, live_only=False):
         where, args = [], []

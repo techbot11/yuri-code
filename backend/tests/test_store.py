@@ -93,6 +93,40 @@ class StoreTests(unittest.TestCase):
         self.store.sessions.update(s)
         self.assertEqual(self.store.sessions.list(live_only=True), [])
 
+    def test_a_millisecond_tie_resolves_to_the_LAST_row_inserted(self):
+        """get_by_native picks THE row for a handle, so a tie is not cosmetic.
+
+        `sessions.native_session_id` has no unique index on purpose: adopt()
+        inserts a second row for a handle whose first row is `stopped`, keeping
+        the closed mission's history. Both rows then answer this query, and
+        `started_at` is utcnow() at MILLISECOND resolution -- so an
+        adopt/stop/adopt inside one millisecond makes the two values equal and
+        `ORDER BY started_at DESC` alone has nothing left to order by. SQLite
+        may then return either row, and the caller silently gets the STOPPED
+        session's mission.
+
+        This was observed as test_session_service's
+        test_re_adopting_a_stopped_handle_stays_unambiguous failing only in
+        full-suite runs, where the timing happened to produce the tie. This
+        test forces the tie instead of waiting for it.
+        """
+        p = Project(slug="tie", name="TIE", root_path="/tmp/tie")
+        self.store.projects.insert(p)
+        same_ms = "2026-09-06T12:00:00.000Z"
+        older = AgentSession(project_id=p.id, agent_id="claude-code", native_session_id="tied",
+                             backend="cli", working_directory="/tmp/tie", status="stopped",
+                             started_at=same_ms)
+        newer = AgentSession(project_id=p.id, agent_id="claude-code", native_session_id="tied",
+                             backend="cli", working_directory="/tmp/tie", status="idle",
+                             started_at=same_ms)
+        self.store.sessions.insert(older)
+        self.store.sessions.insert(newer)
+
+        got = self.store.sessions.get_by_native("tied")
+        self.assertEqual(got.id, newer.id,
+                         "a started_at tie must resolve to the most recently inserted row")
+        self.assertEqual(got.status, "idle")
+
     def test_one_pending_approval_per_session(self):
         a1 = Approval(session_id="s1", agent_id="a", action="run", tool_name="Bash", request_id="r1")
         self.store.approvals.insert(a1)
