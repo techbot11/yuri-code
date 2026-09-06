@@ -25,6 +25,31 @@ import { createTray, setTrayState } from "./tray";
 // Overridable so a verification run can point the shell at other ports
 // without fighting a `bin/yuri up` the developer already has running; absent,
 // the shipping defaults (8000/3000) apply. See lib/ports.ts.
+// Identity, set before ANYTHING reads a path or builds a menu.
+//
+// Two things follow from app.name on macOS, and in a dev run both were wrong:
+//
+//   The menu bar. `electron .` runs inside Electron's OWN bundle, whose
+//   CFBundleName is "Electron", so the app menu read "Electron" beside a
+//   window titled "Yuri OS". The packaged bundle is already correct
+//   (CFBundleName "Yuri OS" from electron-builder's productName); this makes
+//   the dev run agree with it instead of contradicting it.
+//
+//   Where userData goes -- which is where safeStorage's credentials.enc
+//   lives. Un-named, a dev run writes to Application Support/Electron: a
+//   directory EVERY Electron app in development on this machine shares. Two
+//   projects would silently read and write each other's credential store.
+//
+// So the name is set, and then dev is given its own directory rather than
+// inheriting the packaged app's. Sharing one store across two bundles would
+// mean two different code identities reaching for one Keychain item, and an
+// unsigned bundle's identity changes every time it is rebuilt (spike R1) --
+// so they must not be the same file.
+app.setName("Yuri OS");
+if (!app.isPackaged) {
+  app.setPath("userData", path.join(app.getPath("appData"), "Yuri OS (dev)"));
+}
+
 const ports = portsFromEnv(process.env);
 const FRONTEND_URL = `http://localhost:${ports.frontend}`;
 
