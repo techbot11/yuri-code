@@ -17,6 +17,7 @@ import { mergeEnv, withFallbackPath, type Env } from "../lib/env";
 import { MIC_SETTINGS_URL, normalizeMicStatus, type MicStatus } from "../lib/mic";
 import { externalOpenScheme, isAppUrl } from "../lib/urls";
 import { portsFromEnv } from "../lib/ports";
+import { readCredentialsDetailed, writeCredentials } from "./credentials";
 import { startServers, stopServers } from "./servers";
 import { homeDir, probeLoginEnv } from "./shellEnv";
 import { createTray, setTrayState } from "./tray";
@@ -397,6 +398,29 @@ app.whenReady().then(async () => {
   // page-sourced URL to shell.openExternal directly the way this line does.
   ipcMain.on("mic:settings", () => {
     void shell.openExternal(MIC_SETTINGS_URL);
+  });
+
+  // Secrets go renderer -> IPC -> main -> safeStorage and never over HTTP,
+  // not even on loopback (spec 6.3). The reply carries key NAMES only.
+  ipcMain.handle("credentials:write", (_e, updates: Record<string, string>) => {
+    try {
+      return { ok: true, ...writeCredentials(updates) };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : "write failed" };
+    }
+  });
+
+  // Which keys are stored -- never their values -- plus whether the store
+  // exists but could not be decrypted on THIS run. That second fact matters
+  // on its own: an unsigned app's Keychain access is gated on its own code
+  // identity (spike R1), so a rebuilt bundle can lose the ability to read a
+  // store an earlier build wrote. Collapsing that into an empty `names` list
+  // would read to Setup as "nothing was ever saved", which is a different
+  // and much less alarming claim than "what you saved is now unreadable" --
+  // so `unreadable` is surfaced separately rather than folded away here.
+  ipcMain.handle("credentials:names", () => {
+    const r = readCredentialsDetailed();
+    return { names: Object.keys(r.values), unreadable: r.unreadable };
   });
 
   // Checked, not assumed: register() returns false when the accelerator is

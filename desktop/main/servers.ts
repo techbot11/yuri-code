@@ -11,6 +11,7 @@ import type { BootEvent } from "../lib/boot";
 import type { Env } from "../lib/env";
 import { backendCwd, frontendCommand, pythonPath, type PathEnv } from "../lib/paths";
 import { defaultPorts, portBusyDetail, type Ports } from "../lib/ports";
+import { readCredentials } from "./credentials";
 
 const HEALTH_TIMEOUT_MS = 60_000;
 const HEALTH_POLL_MS = 250;
@@ -260,11 +261,21 @@ export async function startServers(env: Env,
   cycles.push(cycle);
 
   const penv = pathEnv();
+  // Credentials merged LAST -- they must win over everything else in `env`,
+  // including a real shell export, because that is the whole point of the
+  // Keychain being consulted at all (spec 6.3): a value the user just saved
+  // in Setup has to take effect on the very next boot rather than losing to
+  // whatever their shell happened to export. Both children get it: the
+  // backend needs it directly, and the coding agents (spawned by the
+  // backend, not here) inherit through it; the frontend gets it too because
+  // it is cheaper to hand it uniformly than to reason about which of the
+  // two might one day need a given key.
+  const withCredentials: Env = { ...env, ...readCredentials() };
   const backend = spawn(
     pythonPath(penv),
     ["-m", "uvicorn", "main:app", "--port", String(ports.backend),
      "--log-level", "info", "--timeout-graceful-shutdown", "3"],
-    { cwd: backendCwd(penv), env, stdio: ["ignore", "pipe", "pipe"] });
+    { cwd: backendCwd(penv), env: withCredentials, stdio: ["ignore", "pipe", "pipe"] });
   const backendRec = track(cycle, "backend", backend, emit);
 
   // ELECTRON_RUN_AS_NODE makes this Electron binary behave as plain Node, so
@@ -277,7 +288,12 @@ export async function startServers(env: Env,
     process.execPath,
     frontendCmd.args,
     { cwd: frontendCmd.cwd,
-      env: { ...env, ...frontendCmd.env, ELECTRON_RUN_AS_NODE: "1" },
+      // Credentials still last: frontendCmd.env sets Next's own runtime
+      // knobs (the port, standalone-mode paths), none of which name a
+      // secret key, so there is nothing here for it to lose to except by
+      // coincidence -- and if a future key ever collided, winning is still
+      // the right behavior for a Keychain value the user just saved.
+      env: { ...env, ...frontendCmd.env, ...readCredentials(), ELECTRON_RUN_AS_NODE: "1" },
       stdio: ["ignore", "pipe", "pipe"] });
   const frontendRec = track(cycle, "frontend", frontend, emit);
 

@@ -38,3 +38,13 @@ contextBridge.exposeInMainWorld("yuriBoot", {
 contextBridge.exposeInMainWorld("yuriTray", {
   set: (state: string) => ipcRenderer.send("tray:state", state),
 });
+
+// Secrets go renderer -> IPC -> main -> safeStorage, never over HTTP -- not
+// even on loopback (spec 6.3). Only present in the desktop shell: a plain
+// browser tab has no bridge at all, and SetupPanel falls back to
+// PUT /yuri/config for secrets there, exactly as it always has.
+contextBridge.exposeInMainWorld("yuriCredentials", {
+  write: (updates: Record<string, string>) =>
+    ipcRenderer.invoke("credentials:write", updates),
+  names: () => ipcRenderer.invoke("credentials:names"),
+});
