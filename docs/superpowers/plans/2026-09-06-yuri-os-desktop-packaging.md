@@ -2103,6 +2103,311 @@ git commit -m "feat(agents): a missing agent is offline, not a locked door"
 
 ---
 
+### Task 8: The same voice handoff, for OpenCode
+
+`integrations/claude-code-plugin` lets you hand a terminal Claude Code session to Yuri: `/voice-handoff` POSTs the session id, cwd and `$TMUX` to `POST /session/handoff`, and she reopens it in a hooked tmux pane so voice and typing share one session. This is the OpenCode equivalent.
+
+**It is a different mechanism, because OpenCode is a different shape.** Claude Code is a process Yuri knows nothing about until told. OpenCode is a *server*: `backend/yuri/providers/opencode/` attaches to `OPENCODE_URL` and every session lives server-side, enumerable at `GET /api/session`. Two consequences:
+
+1. **Nothing needs reopening, and there is no attach dance.** The Claude Code path needs `claude --resume` in a new pane and a Ctrl-D handover because two processes must not write one session. Here the *server* is the single writer, so your TUI keeps running untouched while Yuri talks to the same session. This handoff is pure consent, not surgery.
+2. **Yuri deliberately does not adopt what she did not start.** `provider.py:1054` — "the user's own OpenCode work, and adopting it would put her in charge" — pinned by `test_a_session_yuri_never_ran_is_left_alone` and `test_nothing_known_adopts_nothing`. That invariant is correct and stays. The handoff is the invitation it has been waiting for.
+
+**The constraint that shapes the design: OpenCode does not give a command the session id.** Custom commands (`~/.config/opencode/commands/*.md`) support `$ARGUMENTS`, positional `$1`, and shell injection via `` !`cmd` `` — but no session-id variable is documented, and the plugin hooks do not document one either. So the command cannot say *which* session it is.
+
+It does not need to. It reports its **working directory**, and Yuri resolves the session server-side: sessions whose `location.directory` matches, most recently updated first. Then she says which one she took, by title, so a wrong guess is visible immediately rather than silently. When more than one matches she names them all and adopts none — guessing between two of the user's sessions is exactly the "putting her in charge" this design avoids.
+
+**Files:**
+- Create: `integrations/opencode-plugin/README.md`
+- Create: `integrations/opencode-plugin/commands/voice-handoff.md`
+- Create: `integrations/opencode-plugin/bin/handoff.sh`
+- Create: `backend/yuri/providers/opencode/handoff.py`
+- Create: `backend/tests/test_opencode_handoff.py`
+- Modify: `backend/main.py` (the endpoint)
+
+**Interfaces:**
+- Consumes: `backend/yuri/providers/opencode/provider.py`'s session enumeration and its `known`-set adoption (the same mechanism `rehydrate(known)` uses); `resolve_project_path` from the existing handoff path in `backend/main.py:499`.
+- Produces: `backend/yuri/providers/opencode/handoff.py` with `pick(sessions: list[dict], directory: str) -> Pick`, where `Pick` is a frozen dataclass `(session: dict | None, ambiguous: list[dict], reason: str)`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `backend/tests/test_opencode_handoff.py`:
+
+```python
+import unittest
+
+from yuri.providers.opencode import handoff
+
+
+def s(sid, directory, updated, title="work"):
+    return {"id": sid, "location": {"directory": directory},
+            "time": {"updated": updated}, "title": title}
+
+
+class Pick(unittest.TestCase):
+    def test_one_match_is_taken(self):
+        got = handoff.pick([s("a", "/w/app", 100)], "/w/app")
+        self.assertEqual(got.session["id"], "a")
+        self.assertEqual(got.ambiguous, [])
+
+    def test_a_different_directory_is_not_a_match(self):
+        got = handoff.pick([s("a", "/w/other", 100)], "/w/app")
+        self.assertIsNone(got.session)
+        self.assertIn("no OpenCode session", got.reason)
+
+    def test_nothing_at_all(self):
+        got = handoff.pick([], "/w/app")
+        self.assertIsNone(got.session)
+        self.assertIn("no OpenCode session", got.reason)
+
+    def test_two_in_the_same_directory_adopts_NEITHER(self):
+        # Guessing between two of the user's own sessions is exactly the
+        # "putting her in charge" the provider's design refuses. Name them and
+        # let the user choose.
+        got = handoff.pick([s("a", "/w/app", 100, "api"), s("b", "/w/app", 200, "ui")], "/w/app")
+        self.assertIsNone(got.session)
+        self.assertEqual({x["id"] for x in got.ambiguous}, {"a", "b"})
+        self.assertIn("more than one", got.reason)
+
+    def test_a_match_elsewhere_does_not_make_it_ambiguous(self):
+        got = handoff.pick([s("a", "/w/app", 100), s("b", "/w/other", 200)], "/w/app")
+        self.assertEqual(got.session["id"], "a")
+        self.assertEqual(got.ambiguous, [])
+
+    def test_trailing_slashes_do_not_defeat_the_match(self):
+        # `pwd` and the server can disagree about a trailing slash; a handoff
+        # that fails for that reason would look like a broken integration.
+        self.assertEqual(handoff.pick([s("a", "/w/app/", 100)], "/w/app").session["id"], "a")
+        self.assertEqual(handoff.pick([s("a", "/w/app", 100)], "/w/app/").session["id"], "a")
+
+    def test_a_session_with_no_directory_is_ignored_not_crashed_on
+(self):
+        got = handoff.pick([{"id": "a"}, s("b", "/w/app", 100)], "/w/app")
+        self.assertEqual(got.session["id"], "b")
+
+    def test_a_missing_updated_time_sorts_last_rather_than_raising(self):
+        got = handoff.pick([{"id": "a", "location": {"directory": "/w/app"}}], "/w/app")
+        # Still the only match, so still taken.
+        self.assertEqual(got.session["id"], "a")
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+Fix the line break in that test name before running — it must read `def test_a_session_with_no_directory_is_ignored_not_crashed_on(self):` on one line.
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `cd backend && .venv/bin/python -m unittest tests.test_opencode_handoff -v`
+Expected: FAIL — `ImportError: cannot import name 'handoff'`
+
+- [ ] **Step 3: Write it**
+
+Create `backend/yuri/providers/opencode/handoff.py`. Head it with a comment explaining: which server-side session a `/voice-handoff` from an OpenCode terminal refers to; OpenCode gives a command no session id, so the only thing the caller can report is its working directory, and the session is resolved here by matching `location.directory`; two matches adopt neither, because choosing between two of the user's own sessions is the takeover `provider.py`'s rehydrate deliberately avoids. Pure — the caller fetches the sessions.
+
+```python
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(frozen=True)
+class Pick:
+    """The resolved session, or why there isn't one."""
+    session: dict[str, Any] | None
+    ambiguous: list[dict[str, Any]] = field(default_factory=list)
+    reason: str = ""
+
+
+def _norm(p: str) -> str:
+    """Compare directories without a trailing slash deciding the outcome:
+    `pwd` and the server can disagree about one, and a handoff that failed for
+    that reason would look like a broken integration rather than a mismatch."""
+    return os.path.normpath(p or "")
+
+
+def _updated(session: dict[str, Any]) -> float:
+    t = (session.get("time") or {}).get("updated")
+    try:
+        return float(t)
+    except (TypeError, ValueError):
+        return -1.0     # unknown sorts last rather than raising
+
+
+def pick(sessions: list[dict[str, Any]], directory: str) -> Pick:
+    want = _norm(directory)
+    matches = [
+        s for s in sessions
+        if _norm(str((s.get("location") or {}).get("directory") or "")) == want
+    ]
+    if not matches:
+        return Pick(None, [], f"no OpenCode session is open in {directory}")
+    if len(matches) > 1:
+        # Newest first, so the message names them in the order a person would
+        # guess between.
+        ordered = sorted(matches, key=_updated, reverse=True)
+        return Pick(None, ordered,
+                    f"more than one OpenCode session is open in {directory}")
+    return Pick(matches[0], [], "")
+```
+
+- [ ] **Step 4: Run it to verify it passes**
+
+Run: `cd backend && .venv/bin/python -m unittest tests.test_opencode_handoff -v`
+Expected: PASS, 8 tests.
+
+- [ ] **Step 5: Add the endpoint**
+
+In `backend/main.py`, add `POST /session/handoff/opencode` beside the existing `/session/handoff` at line 499, guarded by the same `Depends(require_auth)`. It must:
+
+1. Take `{"cwd": str}`. Resolve it through the same `resolve_project_path` the Claude Code handoff uses, so it is realpath'd and containment-checked against `ALLOWED_PROJECT_ROOTS` and **fails closed** — a handoff must not be a way to reach a directory the rest of the API refuses.
+2. Get the OpenCode provider from `yuri_app.container()`. If OpenCode is not enabled or the server is unreachable, return a 400 whose message says which — not a 500. "OpenCode is not configured" and "OpenCode is not running" are different problems with different fixes.
+3. Enumerate the server's sessions and call `handoff.pick(sessions, resolved_cwd)`.
+4. On `Pick.session`, adopt it into Yuri's known set using the same path `rehydrate` uses, and record the session/mission rows the Claude Code handoff records — read `SessionService.adopt` and follow it, so a handed-off OpenCode session appears in her lists exactly like any other.
+5. Return `{"session_id", "title", "message"}`. The message says what she took, **by title**, so a wrong resolution is visible at once: e.g. `Voice is live on "api refactor". Keep using your terminal — you are both talking to the same OpenCode server.` No `attach` field: there is nothing to attach to and nothing to exit, and fabricating one would send the user through the Claude Code dance for no reason.
+6. On `Pick.ambiguous`, return 409 with the titles and ids, and a message telling the user to pass one: `More than one session is open here: "api refactor", "ui tweak". Run /voice-handoff <session-id> to choose.`
+7. Accept an optional `session_id` in the body. When given, skip `pick` and use it directly — after confirming it exists on the server and its directory resolves inside the allowed roots. This is what makes the ambiguous case recoverable, and it is also the seam for the day OpenCode does expose a session id to commands.
+
+- [ ] **Step 6: Write the shell script**
+
+Create `integrations/opencode-plugin/bin/handoff.sh`, modelled on `integrations/claude-code-plugin/skills/voice-handoff/handoff.sh` — read that file first and match it. Differences: it sends `cwd` rather than a session id, takes an OPTIONAL session id as `$1` for the ambiguous case, and posts to `/session/handoff/opencode`.
+
+Keep the two properties that file earned the hard way: **always exit 0 and print JSON**, so a stopped backend produces a sentence rather than a broken command; and keep the JSON escaping (`json_escape`) rather than interpolating raw paths, because a directory can contain a quote or a backslash.
+
+```bash
+#!/usr/bin/env bash
+# Registers the OpenCode session running in this directory with the local Yuri
+# backend. Invoked by the /voice-handoff command as: handoff.sh [session-id]
+#
+# OpenCode gives a command no session id, so the id is optional: normally Yuri
+# resolves the session from this directory, and the id is only needed when more
+# than one session is open here.
+#
+# Always exits 0 and prints JSON; failures are reported in an "error" field.
+set -u
+
+url="${YURI_URL:-${YAPCODE_URL:-http://localhost:8000}}"
+sid="${1:-}"
+
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '%s' "$s"
+}
+
+args=(-s -X POST "$url/session/handoff/opencode" -H "Content-Type: application/json")
+token="${YURI_TOKEN:-${YAPCODE_TOKEN:-}}"
+if [ -n "$token" ]; then
+  args+=(-H "X-VC-Token: ${token}")
+fi
+
+if [ -n "$sid" ]; then
+  payload="$(printf '{"cwd":"%s","session_id":"%s"}' \
+    "$(json_escape "$(pwd)")" "$(json_escape "$sid")")"
+else
+  payload="$(printf '{"cwd":"%s"}' "$(json_escape "$(pwd)")")"
+fi
+
+out="$(curl "${args[@]}" -d "$payload" 2>/dev/null)"
+if [ -z "$out" ]; then
+  printf '{"error":"the Yuri backend is not answering at %s — is it running?"}\n' "$url"
+  exit 0
+fi
+printf '%s\n' "$out"
+exit 0
+```
+
+Make it executable: `chmod +x integrations/opencode-plugin/bin/handoff.sh`.
+
+Note both variable names are accepted: `YURI_URL`/`YURI_TOKEN` preferred, `YAPCODE_URL`/`YAPCODE_TOKEN` still honoured, because the Claude Code plugin documents the old names and sub-project 3 has not renamed them yet.
+
+- [ ] **Step 7: Write the command**
+
+Create `integrations/opencode-plugin/commands/voice-handoff.md`. OpenCode custom commands are markdown with YAML frontmatter in `~/.config/opencode/commands/` (global) or `.opencode/commands/` (per project), and `` !`cmd` `` injects a shell command's output into the prompt:
+
+```markdown
+---
+description: Hand this OpenCode session to Yuri so you can keep going by voice
+---
+
+Register the session running in this directory with the local Yuri backend.
+`$1` is an optional session id, needed only when more than one session is open
+in this directory.
+
+Backend response:
+
+!`bash "$HOME/.config/opencode/commands/voice-handoff-bin/handoff.sh" $1`
+
+Using the JSON response above, tell the user in one or two short sentences:
+
+- If it has a `message`: relay it. Say plainly that their terminal keeps
+  working — unlike the Claude Code handoff there is nothing to exit and
+  nothing to attach, because both they and Yuri are talking to the same
+  OpenCode server. Name the session she took, so a wrong one is obvious.
+- If it names more than one session: list the titles and ids and ask which,
+  then tell them to run `/voice-handoff <session-id>`.
+- If it has an `error`: relay it plainly. The usual causes are the Yuri
+  backend not running, or `YURI_URL`/`YURI_TOKEN` needing to be set for a
+  remote backend.
+
+Do not run any other commands.
+```
+
+The script path is written out rather than using a plugin-root variable because OpenCode commands are plain markdown with no documented equivalent of Claude Code's `${CLAUDE_PLUGIN_ROOT}`. The README's install step is what puts the script where this line looks for it — **verify this path resolves in Step 9 rather than trusting it**, and if OpenCode does expose a root variable, use it and fix the README.
+
+- [ ] **Step 8: Write the README**
+
+Create `integrations/opencode-plugin/README.md` covering: what it does; that OpenCode is server-based so there is no attach step and the terminal is unaffected; the install (copy `commands/voice-handoff.md` to `~/.config/opencode/commands/` and `bin/handoff.sh` to `~/.config/opencode/commands/voice-handoff-bin/`, then `chmod +x`); `YURI_URL`/`YURI_TOKEN` for a remote backend; and the honest limitation — OpenCode gives a command no session id, so the session is resolved from the working directory and a directory with two sessions needs `/voice-handoff <id>`.
+
+State plainly that this is **not** an npm-installable OpenCode plugin: OpenCode's JS plugin API (`.opencode/plugins/`, which receives `project`, `directory`, `worktree`, `client` and `$`) documents no session id either, and no way to register a slash command — so a markdown command plus a script is the mechanism that actually exists.
+
+- [ ] **Step 9: Verify it against a real OpenCode session**
+
+This needs OpenCode installed and `YURI_AGENTS` including `opencode`.
+
+```bash
+# Install as the README says.
+mkdir -p ~/.config/opencode/commands/voice-handoff-bin
+cp integrations/opencode-plugin/commands/voice-handoff.md ~/.config/opencode/commands/
+cp integrations/opencode-plugin/bin/handoff.sh ~/.config/opencode/commands/voice-handoff-bin/
+chmod +x ~/.config/opencode/commands/voice-handoff-bin/handoff.sh
+```
+
+Then, with Yuri's backend running on **8198** (`YURI_URL=http://localhost:8198`, never 8000):
+
+1. **The script alone**, before involving OpenCode — it must print JSON in every case:
+   ```bash
+   cd /some/allowed/project && YURI_URL=http://localhost:8198 \
+     bash ~/.config/opencode/commands/voice-handoff-bin/handoff.sh
+   ```
+   With no session open there, expect a JSON body naming that. With the backend stopped, expect the `error` field — **not** an empty output or a curl error, which is the property this script's design exists for.
+2. **With a session open** in that directory in an OpenCode TUI, run it again and confirm it returns the session's id and title, and that Yuri now lists that session (`list_sessions`).
+3. **The command inside OpenCode**: run `/voice-handoff` in the TUI and confirm the shell injection resolves — this is where a wrong script path shows up. Fix the path if it does not.
+4. **The terminal is unaffected**: keep typing in the TUI after the handoff and confirm it still works. This is the claim that distinguishes it from the Claude Code handoff, so verify it rather than asserting it.
+5. **Ambiguity**: open a second session in the same directory, run `/voice-handoff`, and confirm it adopts **neither** and names both.
+
+Report each of the five from what you observed.
+
+- [ ] **Step 10: Run the suites**
+
+```bash
+cd backend && .venv/bin/python -m unittest discover -s tests -q
+```
+
+Expected: 1680 tests, 0 failures.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add integrations/opencode-plugin backend/yuri/providers/opencode/handoff.py backend/tests/test_opencode_handoff.py backend/main.py
+git commit -m "feat(opencode): hand a terminal OpenCode session to Yuri by voice"
+```
+
+---
+
 ## Self-review
 
 **Spec coverage**
@@ -2121,6 +2426,7 @@ git commit -m "feat(agents): a missing agent is offline, not a locked door"
 | §6.4 refuse while a mission runs, or say what it interrupts | 6 |
 | §11 signing and notarization deferred | Global constraint; unsigned throughout |
 | **Clarification, not in the spec: agents are never bundled; absent means offline, not blocked** | 1 (drops the last bundled copy) and 7 (offline instead of a locked door) |
+| **Request, not in the spec: an OpenCode equivalent of the Claude Code voice-handoff plugin** | 8 |
 
 **Deliberately out of scope**, each with a reason: Intel/universal builds (R2 names it a separate later target); code signing and notarization (spec §11, and R1 makes it *indicated* rather than required — the app works unsigned); auto-update; Windows (spec §10 keeps the shape platform-agnostic but targets macOS first); auto-restarting a child that crashes *after* boot without asking (2a's review confirmed a silent restart loop is worse than a visibly dead server — Task 6 gives the user the button instead).
 
