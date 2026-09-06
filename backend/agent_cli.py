@@ -57,7 +57,12 @@ def version(path: str) -> str | None:
     try:
         p = subprocess.run([path, "--version"], capture_output=True, text=True,
                            timeout=VERSION_TIMEOUT_S, check=False)
-    except (OSError, subprocess.SubprocessError):
+    # UnicodeDecodeError too: `text=True` decodes the child's output in the
+    # locale encoding, and a binary that emits bytes invalid in that encoding
+    # raises it instead of OSError/SubprocessError. Vanishingly unlikely for
+    # `--version`, but the docstring promises None on ANY failure, so it has
+    # to be caught here rather than left to escape.
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
         return None
     return parse_version(p.stdout or "") or parse_version(p.stderr or "")
 
