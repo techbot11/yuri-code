@@ -229,6 +229,18 @@ class SDKClaudeRunner(ClaudeRunner):
 
     async def start(self, cwd: str, model: str | None = None, mode: str = "default",
                     agent_slug: str | None = None, agents_json: str | None = None) -> str:
+        # Preflight, matching tmux_runner._preflight's message word for word
+        # (tmux_runner.py:287-288): without this, a missing `claude` reaches
+        # the SDK's own exception instead, which main.py's blanket `except
+        # Exception` (main.py:761) discards in favor of a generic "failed
+        # unexpectedly" -- losing the install instruction. Raising the same
+        # ValueError shape here routes through main.py's `except ValueError`
+        # (main.py:757-760) the same way the tmux backend already does, so
+        # there is one wording for one problem rather than two that can drift.
+        cli_path = agent_cli.resolve()
+        if cli_path is None:
+            raise ValueError("the `claude` CLI is not on PATH — install Claude Code (curl -fsSL https://claude.ai/install.sh | bash) and run `claude` once to sign in")
+
         # Re-assert the directory sandbox at the sink so a session can't start outside
         # ALLOWED_PROJECT_ROOTS even if a caller bypasses resolve_project_path.
         cwd = config.resolve_within_roots(cwd)
@@ -252,10 +264,9 @@ class SDKClaudeRunner(ClaudeRunner):
             **({"model": s.model} if s.model else {}),
             # The SDK prefers its own bundled `claude` over the one on PATH,
             # so without this an sdk session and a cli session run different
-            # Claude Code versions with nothing saying so. Omitted when there
-            # is no `claude` at all, which leaves the SDK's own error (and
-            # doctor's required-check failure) to say so.
-            **({"cli_path": p} if (p := agent_cli.resolve()) else {}),
+            # Claude Code versions with nothing saying so. The preflight above
+            # guarantees cli_path is not None by the time we get here.
+            cli_path=cli_path,
             cwd=cwd,
             permission_mode=s.mode,      # risky tools route to can_use_tool in default/plan
             can_use_tool=_cb,
