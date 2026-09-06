@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { forwardAuth, blockCrossSite } from "@/lib/proxyAuth";
+import { proxyFailure } from "@/lib/proxyError";
 
 const BACKEND = process.env.BACKEND_URL || "http://localhost:8000";
 
@@ -21,7 +22,19 @@ async function proxy(req: NextRequest, path: string[]) {
       init.body = body;
     }
   }
-  const resp = await fetch(`${BACKEND}/yuri/${path.map(encodeURIComponent).join("/")}${qs}`, init);
+  // Wrapped, because an unreached backend is not a server error. Without this
+  // a refused connection threw out of the handler, Next answered a bare 500,
+  // and lib/api.ts's readable() had no body to read -- so Setup showed the
+  // user "Could not load this view: HTTP 500" when the truth was "the backend
+  // is not running". Two different problems with two different fixes, and the
+  // UI was naming the wrong one. See lib/proxyError.ts.
+  let resp: Response;
+  try {
+    resp = await fetch(`${BACKEND}/yuri/${path.map(encodeURIComponent).join("/")}${qs}`, init);
+  } catch (err) {
+    const { status, detail } = proxyFailure(err);
+    return NextResponse.json({ detail }, { status });
+  }
   const text = await resp.text();
   return new NextResponse(text, { status: resp.status, headers: { "Content-Type": "application/json" } });
 }
