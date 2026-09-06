@@ -423,6 +423,22 @@ app.whenReady().then(async () => {
     return { names: Object.keys(r.values), unreadable: r.unreadable };
   });
 
+  // The restart the browser version could never offer: the desktop app owns
+  // the child, so it can drain it and bring it back cleanly. drainFirst is
+  // true -- this is exactly the retry path, and runBootCycle's `booting`
+  // guard is what stops two cycles overlapping.
+  //
+  // Whether it SHOULD restart is the renderer's decision
+  // (frontend/lib/restart.ts): only it knows what is running.
+  ipcMain.handle("backend:restart", async () => {
+    try {
+      await runBootCycle(true);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : "restart failed" };
+    }
+  });
+
   // Checked, not assumed: register() returns false when the accelerator is
   // already taken by another app, and an unlogged false is a shortcut that
   // silently does nothing forever.

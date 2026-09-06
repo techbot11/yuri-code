@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld("yuriBoot", {
   quit: () => ipcRenderer.send("boot:quit"),
   micStatus: () => ipcRenderer.invoke("mic:status"),
   openMicSettings: () => ipcRenderer.send("mic:settings"),
+  restartBackend: () => ipcRenderer.invoke("backend:restart"),
 });
 
 contextBridge.exposeInMainWorld("yuriTray", {

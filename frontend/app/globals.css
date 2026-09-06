@@ -5030,3 +5030,16 @@ a.setup-fix:hover {
    font-size: 12px;
    color: var(--danger);
 }
+
+/* The desktop-only restart offer (SetupPanel.tsx, spec §6.4): a settled block
+   below the ordinary Save/Check-again row, not one more inline action beside
+   them -- it needs room for the warning it always shows, safe or not. */
+.setup-restart {
+   margin-top: 16px;
+   padding-top: 14px;
+   border-top: 1px solid var(--line);
+}
+
+.setup-restart .mcp-blurb {
+   margin-bottom: 10px;
+}

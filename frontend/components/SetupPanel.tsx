@@ -10,6 +10,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, yget, yput } from "@/lib/api";
 import { agentLine, agentVisual, anyAgentAvailable, type Agent } from "@/lib/agents";
+import { useYuri } from "@/components/VoiceProvider";
+import { restartImpact } from "@/lib/restart";
 import {
   blocking, canSave, effectsSentence, fieldPlaceholder, fieldValue, fixAction,
   pendingChanges, shellShadowWarning,
@@ -35,6 +37,22 @@ type YuriCredentialsBridge = {
 function yuriCredentials(): YuriCredentialsBridge | undefined {
   if (typeof window === "undefined") return undefined;
   return (window as unknown as { yuriCredentials?: YuriCredentialsBridge }).yuriCredentials;
+}
+
+// The restart the browser version could never offer (desktop/main/index.ts's
+// backend:restart, desktop/preload/index.ts's yuriBoot.restartBackend): the
+// desktop app owns both children, so it can drain and respawn them cleanly.
+// Absent in a plain browser tab -- there is nothing there to drain -- so
+// every call site guards it exactly like yuriCredentials() above, and
+// GUIDE.md's "a control that cannot work is not rendered" is why the button
+// itself is gated on this rather than merely disabled.
+type YuriBootBridge = {
+  restartBackend: () => Promise<{ ok: true } | { ok: false; error: string }>;
+};
+
+function yuriBoot(): YuriBootBridge | undefined {
+  if (typeof window === "undefined") return undefined;
+  return (window as unknown as { yuriBoot?: YuriBootBridge }).yuriBoot;
 }
 
 /** `keys`, with `.set` corrected for a secret the Keychain holds but the
@@ -106,6 +124,17 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
   // set", because those are different facts and only one of them means
   // "your keys are gone, re-enter them".
   const [credentialsUnreadable, setCredentialsUnreadable] = useState(false);
+  // In flight while runBootCycle(true) drains and respawns both children --
+  // several seconds during which the backend is unreachable. Disabling the
+  // button on this (rather than trusting one click to be the only one) is
+  // what stops a second click starting a second cycle that runBootCycle's
+  // own `booting` guard would otherwise just silently swallow.
+  const [restarting, setRestarting] = useState(false);
+  const [restartError, setRestartError] = useState("");
+
+  // Same source the tray uses (VoiceProvider -> lib/trayState.ts), so this
+  // screen and the tray can never disagree about what "running" means.
+  const { missions, sessions } = useYuri();
 
   const load = useCallback(async (): Promise<DoctorCheck[] | null> => {
     try {
@@ -205,6 +234,37 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
     }
   };
 
+  // The offer restartImpact()'s refusal protects: only reachable at all when
+  // the bridge exists (the button below is not rendered otherwise), and
+  // restartImpact.safe is re-checked here too, not just in the disabled
+  // attribute -- a stale click queued just as a mission started must not
+  // slip through.
+  const doRestart = async () => {
+    const bridge = yuriBoot();
+    const impact = restartImpact(
+      missions.filter((m) => m.status === "running").length, sessions.length);
+    if (!bridge || !impact.safe) return;
+    setRestarting(true);
+    setRestartError("");
+    try {
+      const res = await bridge.restartBackend();
+      if (!res.ok) throw new Error(res.error);
+      // A successful restart navigates this very window to the fresh
+      // frontend it just spawned (desktop/main/index.ts's boot()), which
+      // tears down this whole page -- so nothing below normally runs. It
+      // still matters for the one path where the promise resolves without
+      // that happening: the drain-and-respawn threw before ever reaching
+      // loadURL, in which case this same page is still showing and re-reading
+      // its own state (rather than leaving it stale) is the honest move,
+      // exactly as save() does after writing a key.
+      await load();
+    } catch (e) {
+      setRestartError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRestarting(false);
+    }
+  };
+
   if (loadError) {
     return (
       <section className="setup">
@@ -223,6 +283,25 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
   }
 
   const stops = blocking(checks);
+
+  // Desktop-only, and only when there is something a restart would actually
+  // fix: a key whose declared effect (config.py's MANAGED_KEYS) IS "restart",
+  // or a secret saved to the Keychain this session that the running backend
+  // has not picked up yet (the same `pendingRestart` fact each field already
+  // shows below). Neither on its own would be enough forever -- MANAGED_KEYS
+  // has no "restart" key today, but a secret saved through the bridge always
+  // needs one (see save() above), so this is the real, live trigger.
+  const needsRestart = keys.some((k) =>
+    (k.set && k.effect === "restart")
+    || (k.secret && !k.set && credentialNames.includes(k.name)));
+  // Live sessions: `sessions` (useYuri(), from list_sessions) already holds
+  // only agent processes that are actually up -- unlike missions, which stay
+  // in the list long after they finish, so there is no status to filter on
+  // here the way missionsRunning filters on "running".
+  const runningMissions = missions.filter((m) => m.status === "running").length;
+  const liveSessions = sessions.length;
+  const impact = restartImpact(runningMissions, liveSessions);
+  const bootBridge = yuriBoot();
 
   return (
     <section className="setup">
@@ -361,6 +440,24 @@ export function SetupPanel({ onPass }: { onPass?: () => void }) {
           Check again
         </button>
       </div>
+
+      {needsRestart && bootBridge ? (
+        // Rendered only in Electron (bootBridge is undefined in a plain
+        // browser tab, which can never drain and respawn a child it doesn't
+        // own -- GUIDE.md's "a control that cannot work is not rendered").
+        // Spec §6.4: refuse while a mission is running, or say what it will
+        // interrupt -- the disabled attribute plus the warning right beside
+        // it IS that refusal, not merely a dead button with no reason given.
+        <div className="setup-restart">
+          <div className="mcp-blurb">{impact.warning || "Nothing is running."}</div>
+          {restartError && <pre className="mcp-err">{restartError}</pre>}
+          <button className="txtoggle primary"
+                  disabled={restarting || !impact.safe}
+                  onClick={() => void doRestart()}>
+            {restarting ? "Restarting…" : "Restart Yuri's backend"}
+          </button>
+        </div>
+      ) : null}
     </section>
   );
 }

@@ -288,6 +288,23 @@ It is not yet a `.dmg` you can hand to someone else — it uses this clone's
 `backend/.venv` and needs `claude` and `tmux` installed as usual. Packaging
 comes next.
 
+### Installing the app
+
+    cd frontend && npx next build
+    python3 desktop/scripts/build-python.py
+    npm --prefix desktop run dist
+
+Puts `Yuri OS-0.1.0-arm64.dmg` in `desktop/dist/`. The app ships its own
+Python, so it does not need this clone's `backend/.venv` — but it still needs
+`claude` and `tmux` on your `PATH`, and it uses your own `claude`, not a
+bundled copy, so both backends run the same version.
+
+It is **unsigned**, so the first open needs right-click → Open rather than a
+double-click. Two consequences worth knowing: macOS asks for the microphone
+again after every rebuild (the grant is tied to the bundle, and an unsigned
+one changes identity when it is replaced), and API keys you save in the app
+go to your login Keychain rather than to a file.
+
 ---
 
 ## Install with Homebrew
