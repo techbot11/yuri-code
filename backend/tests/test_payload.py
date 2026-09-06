@@ -39,6 +39,39 @@ class ShouldPrune(unittest.TestCase):
         self.assertTrue(payload.should_prune("lib/python3.14/site-packages/anyio/tests"))
 
 
+class TclTk(unittest.TestCase):
+    """PRUNE_SEGMENTS claimed to remove the GUI toolkit and did not: the
+    directories carry their version in the name (tcl8.6, tk8.6, itcl4.2.4) so a
+    literal segment match never saw them, and 7.8 MB of Tcl/Tk was shipping in
+    an app whose only UI is the renderer."""
+
+    def test_versioned_tk_directories_are_pruned(self):
+        for rel in ("lib/tcl8.6", "lib/tk8.6", "lib/itcl4.2.4", "lib/itk3.4"):
+            self.assertTrue(payload.should_prune(rel), rel)
+
+    def test_the_versioned_rule_cannot_reach_real_packages(self):
+        # It is anchored to "one of these words then only digits and dots", so
+        # it can never behave like the substring rule the tests above reject.
+        for rel in ("lib/python3.14/site-packages/tenacity",
+                    "lib/python3.14/site-packages/typing_extensions",
+                    "lib/python3.14/site-packages/tqdm",
+                    "lib/python3.14/site-packages/itsdangerous"):
+            self.assertFalse(payload.should_prune(rel), rel)
+
+    def test_the_toolkit_s_loose_files_are_pruned(self):
+        for rel in ("lib/libtcl8.6.dylib", "lib/libtk8.6.dylib",
+                    "lib/python3.14/lib-dynload/_tkinter.cpython-314-darwin.so"):
+            self.assertTrue(payload.should_prune_file(rel), rel)
+
+    def test_the_file_rule_spares_what_the_app_links_against(self):
+        # The single most destructive mistake available here: deleting the
+        # interpreter's own shared library, or a native wheel's extension.
+        for rel in ("lib/libpython3.14.dylib", "bin/python3",
+                    "lib/python3.14/site-packages/_cffi_backend.abi3.so",
+                    "lib/python3.14/lib-dynload/_socket.cpython-314-darwin.so"):
+            self.assertFalse(payload.should_prune_file(rel), rel)
+
+
 class Budget(unittest.TestCase):
     def test_the_budget_is_a_real_ceiling_not_a_placeholder(self):
         # 355 MB is the UNtrimmed measurement from spike R2. A budget at or

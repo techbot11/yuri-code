@@ -13,6 +13,8 @@ an import rather than at this file.
 """
 from __future__ import annotations
 
+import re
+
 # Whole directory names to drop wherever they appear in the payload.
 PRUNE_SEGMENTS: tuple[str, ...] = (
     "__pycache__",     # regenerated on first import
@@ -27,7 +29,18 @@ PRUNE_SEGMENTS: tuple[str, ...] = (
     "lib2to3",
 )
 
-# Measured 81.2 MB on 2026-09-06 (from 321.3 MB untrimmed). ~10% headroom.
+# Measured 74.1 MB on 2026-09-06 (from 321.3 MB untrimmed, 247.2 MB pruned).
+# 80 MB is ~8% headroom, chosen against a specific regression rather than by
+# rule of thumb: Tcl/Tk coming back is +7.8 MB, so a 10% ceiling (82 MB) would
+# have admitted the exact thing that was just removed, by 0.1 MB.
+#
+# What this gate is and is not for. It catches GROSS regressions -- the SDK's
+# 203 MB bundled `claude` returning trips it by a mile. It cannot catch a
+# regression smaller than its own headroom, and tightening it until it could
+# would fail honest dependency growth instead. Specific rules are guarded by
+# specific tests: should_prune's segment cases, and TclTk's four. If a prune
+# rule is ever deleted, a test fails by name; the gate is the backstop for
+# what no test anticipated.
 # A gate, not a guess: it exists so a dependency that quietly reintroduces a
 # large payload fails the build instead of shipping.
 #
@@ -39,7 +52,20 @@ PRUNE_SEGMENTS: tuple[str, ...] = (
 # measured after the import probe). Re-measuring a used payload and comparing
 # it to this number will look like a breach that is not one -- rebuild with
 # --clean before you conclude anything.
-MAX_PAYLOAD_BYTES: int = 90 * 1024 * 1024
+MAX_PAYLOAD_BYTES: int = 80 * 1024 * 1024
+
+
+# Tcl/Tk, which PRUNE_SEGMENTS claims to remove and does not. The directories
+# carry their version in the name -- tcl8.6, tk8.6, itcl4.2.4 -- so a literal
+# segment match never sees them, and 7.8 MB of a GUI toolkit this app can never
+# use was shipping. Anchored to "one of these words followed only by digits and
+# dots", which cannot reach tkinter (letters after "tk") or anything in
+# site-packages.
+_VERSIONED_TK = re.compile(r"^(?:tcl|tk|itcl|itk)[0-9.]*$")
+
+# The same toolkit's loose files, which are not directories and so are invisible
+# to should_prune: libtcl8.6.dylib, libtk8.6.dylib, _tkinter.<abi>.so.
+_TK_FILE = re.compile(r"^(?:libtcl|libtk|_tkinter)")
 
 
 def should_prune(rel: str) -> bool:
@@ -48,7 +74,19 @@ def should_prune(rel: str) -> bool:
     `rel` is compared segment by segment, so "pytest_asyncio" survives a
     "test" rule and "pipeline" survives a "pip" rule.
     """
-    return any(seg in PRUNE_SEGMENTS for seg in rel.split("/"))
+    return any(seg in PRUNE_SEGMENTS or _VERSIONED_TK.match(seg)
+               for seg in rel.split("/"))
+
+
+def should_prune_file(rel: str) -> bool:
+    """Whether a payload-relative FILE should be dropped.
+
+    Separate from should_prune because the walk applies that one to directory
+    names only, and Tcl/Tk ships three files that no directory rule can reach.
+    Kept narrow on purpose: a file rule that matched as loosely as a directory
+    rule would delete a shared library something actually links against.
+    """
+    return bool(_TK_FILE.match(rel.rsplit("/", 1)[-1]))
 
 
 def within_budget(total: int) -> bool:

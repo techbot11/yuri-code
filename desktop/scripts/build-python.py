@@ -99,13 +99,25 @@ def install_requirements() -> None:
 def prune() -> int:
     removed = 0
     # Bottom-up so a pruned parent does not invalidate the walk.
-    for dirpath, dirnames, _files in os.walk(PAYLOAD_DIR, topdown=False):
+    for dirpath, dirnames, files in os.walk(PAYLOAD_DIR, topdown=False):
         for d in list(dirnames):
             full = os.path.join(dirpath, d)
             rel = os.path.relpath(full, PAYLOAD_DIR)
             if payload.should_prune(rel):
                 removed += dir_size(full)
                 shutil.rmtree(full, ignore_errors=True)
+        # Files as well as directories: Tcl/Tk ships three loose files that no
+        # directory rule can reach, and they are ~3 MB of a toolkit this app
+        # never loads.
+        for f in files:
+            full = os.path.join(dirpath, f)
+            rel = os.path.relpath(full, PAYLOAD_DIR)
+            if payload.should_prune_file(rel):
+                try:
+                    removed += os.path.getsize(full)
+                    os.unlink(full)
+                except OSError:
+                    pass
     return removed
 
 
