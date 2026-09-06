@@ -9,7 +9,7 @@ import * as net from "node:net";
 import * as path from "node:path";
 import type { BootEvent } from "../lib/boot";
 import type { Env } from "../lib/env";
-import { backendCwd, pythonPath, type PathEnv } from "../lib/paths";
+import { backendCwd, frontendCommand, pythonPath, type PathEnv } from "../lib/paths";
 import { defaultPorts, portBusyDetail, type Ports } from "../lib/ports";
 
 const HEALTH_TIMEOUT_MS = 60_000;
@@ -201,13 +201,30 @@ function track(cycle: Cycle, name: ChildName, child: ChildProcess,
              detail: rec.stderr.trim() || `${name} exited with code ${code}` });
     }
   });
+  // A spawn whose executable does not exist (or cannot be launched at all --
+  // a bad interpreter, a permissions error) emits 'error', NOT 'exit': Node
+  // never got far enough to have a process to exit. Measured directly (see
+  // task-3 fixes report): for an ENOENT target, 'exit' never fires at all, so
+  // without this handler that failure produced no log, no boot failure, and
+  // no message anywhere -- the window just sat waiting for a port that would
+  // never open. Routed into the same `emit` path 'exit' uses so the boot
+  // state machine and the frontend's splash, which already know how to
+  // display a failed child, learn about this one too instead of a new
+  // surface being invented for it. `err.message` is exactly the diagnosis
+  // needed (e.g. "spawn .../next ENOENT") -- never the child's env, which is
+  // never touched here.
+  child.on("error", (err) => {
+    rec.dead = true;
+    rec.detach();
+    emit({ type: "failed", child: name,
+           detail: rec.stderr.trim() || `${name} failed to start: ${err.message}` });
+  });
   return rec;
 }
 
 export async function startServers(env: Env,
                                    onEvent: (ev: BootEvent) => void,
                                    ports: Ports = defaultPorts()): Promise<void> {
-  const root = repoRoot();
   const deadline = Date.now() + HEALTH_TIMEOUT_MS;
 
   // This call's own cycle. Everything below reports through `emit` rather
@@ -252,13 +269,15 @@ export async function startServers(env: Env,
 
   // ELECTRON_RUN_AS_NODE makes this Electron binary behave as plain Node, so
   // Next runs on Electron's own Node 22.16 and no second runtime is bundled
-  // (spec §4.2, verified: Ready in 188ms).
+  // (spec §4.2, verified: Ready in 188ms). frontendCommand() picks `next
+  // start` (dev, where frontend/node_modules exists) or the standalone
+  // server.js (packaged, where it does not) -- see lib/paths.ts.
+  const frontendCmd = frontendCommand(penv, ports.frontend);
   const frontend = spawn(
     process.execPath,
-    [path.join(root, "frontend/node_modules/next/dist/bin/next"),
-     "start", "-H", "127.0.0.1", "-p", String(ports.frontend)],
-    { cwd: path.join(root, "frontend"),
-      env: { ...env, ELECTRON_RUN_AS_NODE: "1" },
+    frontendCmd.args,
+    { cwd: frontendCmd.cwd,
+      env: { ...env, ...frontendCmd.env, ELECTRON_RUN_AS_NODE: "1" },
       stdio: ["ignore", "pipe", "pipe"] });
   const frontendRec = track(cycle, "frontend", frontend, emit);
 

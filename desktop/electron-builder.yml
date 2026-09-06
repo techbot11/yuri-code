@@ -39,11 +39,47 @@ extraResources:
       - "!tests/**"
       - "!**/__pycache__/**"
       - "!.env"
-  # The built frontend, which `next start` serves.
+  # The built frontend. `frontend/node_modules` (388 MB) is deliberately NOT
+  # here -- it would roughly triple this .dmg over the 132 MB it is without
+  # it. Instead this ships `next build`'s `output: "standalone"` tree
+  # (frontend/next.config.mjs), a minimal `server.js` plus only the
+  # dependencies it actually reaches, run with `node server.js` rather than
+  # `next start` (see desktop/lib/paths.ts's frontendCommand()).
+  #
+  # `from` is `../frontend/.next`, NOT `.next/standalone` directly, and the
+  # filter is what actually selects `standalone/**/*` -- electron-builder's
+  # own file filter (app-builder-lib's createFilter) unconditionally drops a
+  # `node_modules` directory that sits at the LITERAL ROOT of an
+  # extraResources `from` path ("filter the root node_modules, but not a sub
+  # node_modules", by design, to stop an app's raw source node_modules from
+  # being copied by accident). `.next/standalone/node_modules` IS that root
+  # if `from` points at `standalone` itself, so it was always silently
+  # stripped -- measured directly: the .dmg built, `server.js` was present,
+  # `node_modules` was not, and the app would have failed the same
+  # `MODULE_NOT_FOUND` way `next start` did in Defect 1, just one layer
+  # deeper. Rooting `from` one level higher, at `.next`, makes the relative
+  # path `standalone/node_modules` instead -- no longer the literal root, so
+  # the hard-coded exclusion does not fire, and the filter pattern is what
+  # decides inclusion instead.
   - from: ../frontend/.next
-    to: frontend/.next
+    to: frontend
+    filter:
+      - "standalone/**/*"
+  # Next's standalone output does NOT copy `.next/static` or `public/` into
+  # that tree -- its own docs say to place them there yourself -- so the two
+  # entries below layer them onto the same `frontend/standalone` resource
+  # exactly where server.js expects them: `.next/static` next to the rest of
+  # `.next`, and `public` as a sibling of `server.js`. Skipping this step
+  # produces a server that answers 200 with unstyled, unscripted HTML --
+  # looks alive, is broken.
+  - from: ../frontend/.next/static
+    to: frontend/standalone/.next/static
+  # frontend/public does not exist in this repo today; electron-builder skips
+  # a missing `from` harmlessly (confirmed in the task-3 bundle checks). Kept
+  # here so a future `public/` (favicons, static images) is picked up for
+  # free instead of silently missing from the bundle.
   - from: ../frontend/public
-    to: frontend/public
+    to: frontend/standalone/public
 
 mac:
   category: public.app-category.productivity

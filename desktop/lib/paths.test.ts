@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { backendCwd, pythonPath, type PathEnv } from "./paths.ts";
+import { backendCwd, frontendCommand, pythonPath, type PathEnv } from "./paths.ts";
 
 const packaged: PathEnv = {
   packaged: true,
@@ -39,4 +39,49 @@ test("a path with spaces is returned intact, not escaped or quoted", () => {
   assert.ok(pythonPath(packaged).includes("Yuri OS.app"));
   assert.ok(!pythonPath(packaged).includes("\\"));
   assert.ok(!pythonPath(packaged).includes('"'));
+});
+
+test("dev: the frontend runs via `next start`, with the port as an argument", () => {
+  const cmd = frontendCommand(dev, 3000);
+  assert.equal(cmd.cwd, "/Users/me/yuri-code/frontend");
+  assert.deepEqual(cmd.args, [
+    "/Users/me/yuri-code/frontend/node_modules/next/dist/bin/next",
+    "start", "-H", "127.0.0.1", "-p", "3000",
+  ]);
+  // No node_modules in the packaged bundle -- but this is dev, so nothing
+  // here should reach for it.
+  assert.deepEqual(cmd.env, {});
+});
+
+test("packaged: the frontend runs the standalone server, with the port as env", () => {
+  const cmd = frontendCommand(packaged, 3000);
+  assert.equal(cmd.cwd,
+    "/Applications/Yuri OS.app/Contents/Resources/frontend/standalone");
+  assert.deepEqual(cmd.args, [
+    "/Applications/Yuri OS.app/Contents/Resources/frontend/standalone/server.js",
+  ]);
+  // The standalone server.js reads PORT/HOSTNAME from its environment, not
+  // argv -- unlike `next start`, which takes -H/-p on the command line.
+  assert.equal(cmd.env.PORT, "3000");
+  assert.equal(cmd.env.HOSTNAME, "127.0.0.1");
+});
+
+test("packaged: a different port produces a different PORT env, same argv", () => {
+  const cmd = frontendCommand(packaged, 8123);
+  assert.equal(cmd.env.PORT, "8123");
+  assert.deepEqual(cmd.args, [
+    "/Applications/Yuri OS.app/Contents/Resources/frontend/standalone/server.js",
+  ]);
+});
+
+test("packaged: the frontend command never reaches for the repo", () => {
+  const cmd = frontendCommand(packaged, 3000);
+  assert.ok(!cmd.cwd.includes("/ignored/when/packaged"));
+  assert.ok(!cmd.args.some((a) => a.includes("/ignored/when/packaged")));
+});
+
+test("dev: the frontend command never reaches for a packaged bundle path", () => {
+  const cmd = frontendCommand(dev, 3000);
+  assert.ok(!cmd.cwd.includes("Resources"));
+  assert.ok(!cmd.args.some((a) => a.includes("Resources")));
 });
