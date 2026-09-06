@@ -323,6 +323,43 @@ AGENT_ENV_VARS: tuple[str, ...] = (
 )
 
 
+# The rest of the environment an agent needs to behave like the user's own
+# terminal. Same root cause as AGENT_ENV_VARS above -- a tmux pane inherits the
+# SERVER's environment, and that server is days old -- but a different class of
+# variable, so kept separate: these are shell context, not credentials.
+#
+# A DELIBERATE LIST, not os.environ wholesale. Handing the agent everything
+# would ship Yuri's own internals (VC_AUTH_TOKEN, YURI_*, the desktop shell's
+# bookkeeping) into a shell the user reads and a model sees. Each entry below
+# earned its place:
+#
+#   LANG, LC_ALL      Text encoding. A missing locale is how a subprocess ends
+#                     up decoding bytes wrongly -- this repo has already caught
+#                     one UnicodeDecodeError from exactly that shape.
+#   SSH_AUTH_SOCK     An agent that runs `git push` over SSH needs the agent
+#                     socket, and the socket path is per-login: a five-day-old
+#                     tmux server points at one that no longer exists. Carried
+#                     only when ours actually EXISTS, so a dead socket of ours
+#                     never replaces a live one of theirs.
+#   HTTP(S)_PROXY,    Behind a corporate proxy an agent cannot reach anything
+#   NO_PROXY          without these, and they are exactly the kind of thing
+#                     configured after a tmux server started.
+#
+# Deliberately ABSENT, and each for a reason found the hard way:
+#   HOME              The pane's own HOME is already correct, and getting it
+#                     wrong moves ~/.claude out from under the CLI. No upside.
+#   NODE_OPTIONS      Verification in this repo hit port collisions from an
+#                     inherited --inspect; passing it down would make that a
+#                     shipped behaviour rather than an accident.
+#   TERM              tmux sets it correctly for the pane it created.
+AGENT_SHELL_VARS: tuple[str, ...] = (
+    "LANG", "LC_ALL",
+    "SSH_AUTH_SOCK",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "no_proxy",
+)
+
+
 def agent_child_env() -> dict[str, str]:
     """The AGENT_ENV_VARS that are actually set, for handing to an agent child.
     Absent and blank are the same thing: a blank would shadow whatever the
@@ -332,6 +369,28 @@ def agent_child_env() -> dict[str, str]:
         v = (os.getenv(k) or "").strip()
         if v:
             out[k] = v
+    return out
+
+
+def agent_shell_env(getenv=os.getenv, exists=os.path.exists) -> dict[str, str]:
+    """The AGENT_SHELL_VARS worth handing over, with their caveats applied.
+
+    `getenv` and `exists` are injected so the rules are testable without
+    arranging a real environment or a real socket.
+
+    Blank is the same as absent, as above. SSH_AUTH_SOCK additionally has to
+    point at something that is there: ours being stale is as likely as theirs,
+    and replacing a working socket with a dead one would break `git push` in
+    the name of fixing it.
+    """
+    out: dict[str, str] = {}
+    for k in AGENT_SHELL_VARS:
+        v = (getenv(k) or "").strip()
+        if not v:
+            continue
+        if k == "SSH_AUTH_SOCK" and not exists(v):
+            continue
+        out[k] = v
     return out
 
 

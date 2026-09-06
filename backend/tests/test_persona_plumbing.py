@@ -544,9 +544,18 @@ class TmuxAgentEnvTests(_TmuxHarness):
         self.assertEqual(out.stdout, hostile,
                          "the value a shell recovers must equal the value we were given")
 
-    async def test_an_empty_file_is_still_written(self):
-        # A rehydrated session must never source a stale file from a previous
-        # configuration.
+    async def test_no_credential_survives_a_rewrite(self):
+        """A rehydrated session must never source a stale file from a previous
+        configuration.
+
+        This used to assert the file was EMPTY when no credentials were set,
+        which was a proxy for the same thing and stopped being true when PATH
+        and the shell context began travelling too (config.AGENT_SHELL_VARS) --
+        that was the fix for `claude` running with a five-day-old PATH and
+        every hook failing on "node: command not found". So it now asserts the
+        invariant itself: whatever the file holds, it holds no credential this
+        process does not currently have.
+        """
         with mock.patch.dict(os.environ, {}, clear=False):
             for k in config.AGENT_ENV_VARS:
                 os.environ.pop(k, None)
@@ -554,7 +563,10 @@ class TmuxAgentEnvTests(_TmuxHarness):
         path = os.path.join(runner._sessions[handle].ctrl, "agent.env")
         self.assertTrue(os.path.isfile(path))
         with open(path) as f:
-            self.assertEqual(f.read(), "")
+            body = f.read()
+        for k in config.AGENT_ENV_VARS:
+            self.assertNotIn(f"{k}=", body,
+                             f"{k} was unset, so no line for it may remain")
 
     async def test_agent_child_env_skips_blanks(self):
         with mock.patch.dict(os.environ, {"ANTHROPIC_MODEL": "   ",

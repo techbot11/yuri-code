@@ -383,12 +383,27 @@ class TmuxClaudeRunner(ClaudeRunner):
         return session_id
 
     def _write_agent_env(self, s: _TmuxSession) -> None:
-        """Hand the agent the credentials this process holds.
+        """Hand the agent the environment this process holds: credentials, the
+        shell context it needs to behave like the user's own terminal, and PATH.
 
         A tmux pane inherits the tmux SERVER's environment, not ours, and that
         server is typically days old -- so anything Setup saved after it
         started is invisible to `claude`, which then falls back to OAuth and
         asks the user to log in. That was a live bug, not a hypothetical.
+
+        PATH is the same bug wearing different clothes, and it was found the
+        same way -- by a user, in a real session. Credentials were fixed here
+        and PATH was left behind, so `claude` ran with a five-day-old PATH that
+        predated the user's node install: every one of its hooks shells out to
+        `node`, /bin/sh inherited that PATH, and the session filled with
+        "/bin/sh: node: command not found". A version-managed toolchain (nvm,
+        volta, fnm) makes this near-certain rather than unlucky, because its
+        bin directory is version-stamped and cannot be a static fallback.
+
+        PREPENDED, not replaced: `PATH='<ours>':"$PATH"` keeps whatever the
+        pane already had and simply gives ours priority. Replacing it would fix
+        node and could break something the tmux server knew about that this
+        process does not.
 
         Written even when empty (as an empty file) so a rehydrated session
         never sources a stale file from a previous configuration.
@@ -399,11 +414,28 @@ class TmuxClaudeRunner(ClaudeRunner):
         # window where another user on the machine can read the key.
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, "w") as f:
-            for k, v in config.agent_child_env().items():
+            def q(v: str) -> str:
                 # Single-quoted for `.` to read back verbatim; a literal quote
                 # inside a value is escaped the POSIX way. A newline cannot
-                # appear here -- PUT /yuri/config refuses one.
-                f.write(f"{k}='{v.replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'\n")
+                # appear in a credential -- PUT /yuri/config refuses one.
+                return "'" + v.replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39)) + "'"
+
+            for k, v in config.agent_child_env().items():
+                f.write(f"{k}={q(v)}\n")
+            # Shell context, not credentials -- locale, the ssh-agent socket,
+            # proxy settings. A deliberate list (config.AGENT_SHELL_VARS), not
+            # os.environ wholesale: handing the agent everything would ship
+            # Yuri's own bookkeeping into a shell the user reads and a model
+            # sees.
+            for k, v in config.agent_shell_env().items():
+                f.write(f"{k}={q(v)}\n")
+            # PATH last and prepended, so ours wins without discarding the
+            # pane's. The trailing ":$PATH" is deliberately OUTSIDE the quotes
+            # so the sourcing shell expands it; ours stays quoted so a path
+            # containing a space or a dollar sign cannot be re-interpreted.
+            own_path = (os.environ.get("PATH") or "").strip()
+            if own_path:
+                f.write(f'PATH={q(own_path)}":$PATH"\n')
         os.replace(tmp, path)
         os.chmod(path, 0o600)
 
